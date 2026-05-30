@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 import sys, subprocess, json, threading
 from pathlib import Path
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QCheckBox, QDialog, QSystemTrayIcon, QMenu, QAction, QMessageBox,
+    QCheckBox, QDialog, QSystemTrayIcon, QMenu, QMessageBox,
     QInputDialog
 )
-from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 PIPER_DIR = Path.home() / ".local/share/piper"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
@@ -57,7 +57,7 @@ def switch_model(model):
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
 
-# ── worker threads ────────────────────────────────────────────────────────────
+# ── worker threads ────────────────────────────────────────────────────────────────
 
 class SpeakWorker(QThread):
     def __init__(self, text, to_mic):
@@ -110,7 +110,7 @@ class SpeakDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("TTS")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self._worker = None
 
         row = QHBoxLayout()
@@ -219,12 +219,12 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _tray_activated(self, reason):
-        if reason == QSystemTrayIcon.Trigger:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._tray_speak()
 
     def _tray_speak(self):
         d = SpeakDialog(self)
-        d.exec_()
+        d.exec()
 
     def refresh(self):
         active = get_active()
@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
         if m == get_active():
             QMessageBox.warning(self, "Remove", "Can't remove active model - switch first")
             return
-        if QMessageBox.question(self, "Remove", f"Delete {m}?") == QMessageBox.Yes:
+        if QMessageBox.question(self, "Remove", f"Delete {m}?") == QMessageBox.StandardButton.Yes:
             (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
             (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
             self.refresh()
@@ -320,9 +320,9 @@ if __name__ == "__main__":
 
     if len(sys.argv) > 1 and sys.argv[1] == "--speak":
         d = SpeakDialog()
-        d.exec_()
+        d.exec()
         sys.exit(0)
 
     win = MainWindow()
     win.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
