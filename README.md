@@ -41,4 +41,4 @@ Set action to: `~/.local/bin/tts-speak`
 
 ## Credits
 
-- [gn_u](https://github.com/gn_u) - for being alive
+- [neoapps-dev](https://github.com/neoapps-dev) - for being alive
