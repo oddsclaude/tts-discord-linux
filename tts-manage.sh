@@ -3,6 +3,7 @@ set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info() { echo -e "${GREEN}[tts-manage]${NC} $*"; }
+warn() { echo -e "${YELLOW}[tts-manage]${NC} $*"; }
 die()  { echo -e "${RED}[tts-manage] error:${NC} $*" >&2; exit 1; }
 
 PIPER_DIR="$HOME/.local/share/piper"
@@ -12,15 +13,19 @@ REPO_RAW="https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 usage() {
     echo "usage: tts-manage <command>"
     echo ""
-    echo "  status              show active voice and installed models"
-    echo "  switch MODEL        switch active voice (downloads if needed)"
-    echo "  download MODEL      download a voice model without switching"
-    echo "  remove MODEL        delete a downloaded voice model"
-    echo "  list                list installed voice models"
-    echo "  update              update scripts to latest from repo"
-    echo "  uninstall           remove everything (scripts, service, models)"
+    echo "  status                 show active voice and installed models"
+    echo "  switch MODEL           switch active voice (downloads if needed)"
+    echo "  download MODEL         download a voice model without switching"
+    echo "  download-all [FILTER]  download all voices (optional grep filter e.g. en_US)"
+    echo "  remove MODEL           delete a downloaded voice model"
+    echo "  list                   list installed voice models"
+    echo "  update                 update scripts to latest from repo"
+    echo "  uninstall              remove everything (scripts, service, models)"
     echo ""
-    echo "example: tts-manage switch en_GB-alan-medium"
+    echo "examples:"
+    echo "  tts-manage switch en_GB-alan-medium"
+    echo "  tts-manage download-all en_US"
+    echo "  tts-manage download-all          # all voices (several GB)"
 }
 
 parse_voice_url() {
@@ -99,6 +104,55 @@ cmd_remove() {
     info "removed $model"
 }
 
+cmd_download_all() {
+    local filter="${1:-}"
+    info "fetching voice index..."
+    local voices_json
+    voices_json=$(curl -fsSL "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json")
+    local models
+    models=$(echo "$voices_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for key in sorted(data.keys()):
+    print(key)
+")
+    local total downloaded=0
+    total=$(echo "$models" | wc -l)
+
+    if [[ -n "$filter" ]]; then
+        models=$(echo "$models" | grep "$filter" || true)
+        local matched
+        matched=$(echo "$models" | grep -c . || true)
+        info "filter '$filter' matched $matched of $total models"
+    else
+        warn "downloading ALL $total voice models - this will use several GB of disk space"
+        read -rp "Continue? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { echo "cancelled"; exit 0; }
+    fi
+
+    mkdir -p "$PIPER_DIR"
+    while IFS= read -r model; do
+        [[ -z "$model" ]] && continue
+        if [[ -f "${PIPER_DIR}/${model}.onnx" ]]; then
+            echo "  skip $model (exists)"
+        else
+            echo -n "  $model... "
+            local base_url
+            base_url=$(parse_voice_url "$model")
+            if curl -fsSL "${base_url}.onnx"      -o "${PIPER_DIR}/${model}.onnx" \
+            && curl -fsSL "${base_url}.onnx.json" -o "${PIPER_DIR}/${model}.onnx.json"; then
+                echo "done"
+                ((downloaded++)) || true
+            else
+                echo "FAILED"
+                rm -f "${PIPER_DIR}/${model}.onnx" "${PIPER_DIR}/${model}.onnx.json"
+            fi
+        fi
+    done <<< "$models"
+
+    info "done - $downloaded new models downloaded"
+}
+
 cmd_update() {
     info "updating scripts from repo..."
     curl -fL "${REPO_RAW}/tts-manage.sh"   -o ~/.local/bin/tts-manage   && chmod +x ~/.local/bin/tts-manage
@@ -140,12 +194,13 @@ cmd_uninstall() {
 [[ $# -eq 0 ]] && { usage; exit 0; }
 
 case "$1" in
-    status)    cmd_status ;;
-    list)      cmd_list ;;
-    switch)    [[ $# -lt 2 ]] && die "usage: tts-manage switch MODEL"; cmd_switch "$2" ;;
-    download)  [[ $# -lt 2 ]] && die "usage: tts-manage download MODEL"; cmd_download "$2" ;;
-    remove)    [[ $# -lt 2 ]] && die "usage: tts-manage remove MODEL"; cmd_remove "$2" ;;
-    update)    cmd_update ;;
-    uninstall) cmd_uninstall ;;
+    status)       cmd_status ;;
+    list)         cmd_list ;;
+    switch)       [[ $# -lt 2 ]] && die "usage: tts-manage switch MODEL"; cmd_switch "$2" ;;
+    download)     [[ $# -lt 2 ]] && die "usage: tts-manage download MODEL"; cmd_download "$2" ;;
+    download-all) cmd_download_all "${2:-}" ;;
+    remove)       [[ $# -lt 2 ]] && die "usage: tts-manage remove MODEL"; cmd_remove "$2" ;;
+    update)       cmd_update ;;
+    uninstall)    cmd_uninstall ;;
     *) usage; die "unknown command: $1" ;;
 esac
