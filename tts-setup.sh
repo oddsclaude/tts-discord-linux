@@ -101,10 +101,14 @@ cat > ~/.local/bin/tts-speak << 'EOF'
 #!/bin/bash
 MODEL="$HOME/.local/share/piper/en_US-lessac-medium.onnx"
 
-if   command -v kdialog &>/dev/null; then TEXT=$(kdialog --title "TTS" --inputbox "Say:")
-elif command -v zenity  &>/dev/null; then TEXT=$(zenity --entry --title "TTS" --text "Say:")
-elif command -v rofi    &>/dev/null; then TEXT=$(echo "" | rofi -dmenu -p "Say:")
-else read -rp "Say: " TEXT
+if [[ $# -gt 0 ]]; then
+    TEXT="$*"
+else
+    if   command -v kdialog &>/dev/null; then TEXT=$(kdialog --title "TTS" --inputbox "Say:")
+    elif command -v zenity  &>/dev/null; then TEXT=$(zenity --entry --title "TTS" --text "Say:")
+    elif command -v rofi    &>/dev/null; then TEXT=$(echo "" | rofi -dmenu -p "Say:")
+    else read -rp "Say: " TEXT
+    fi
 fi
 [[ -z "${TEXT:-}" ]] && exit 0
 
