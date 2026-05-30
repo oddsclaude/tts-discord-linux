@@ -17,6 +17,7 @@ usage() {
     echo "  switch MODEL           switch active voice (downloads if needed)"
     echo "  download MODEL         download a voice model without switching"
     echo "  download-all [FILTER]  download all voices (optional grep filter e.g. en_US)"
+    echo "  test-all               play each installed model saying its own name"
     echo "  remove MODEL           delete a downloaded voice model"
     echo "  list                   list installed voice models"
     echo "  update                 update scripts to latest from repo"
@@ -153,6 +154,21 @@ for key in sorted(data.keys()):
     info "done - $downloaded new models downloaded"
 }
 
+cmd_test_all() {
+    local found=0
+    for f in "${PIPER_DIR}"/*.onnx; do
+        [[ -f "$f" ]] || continue
+        local name rate
+        name=$(basename "$f" .onnx)
+        rate=$(python3 -c "import json; d=json.load(open('${PIPER_DIR}/${name}.onnx.json')); print(d['audio']['sample_rate'])" 2>/dev/null || echo "22050")
+        echo -e "${CYAN}testing:${NC} $name"
+        piper-tts --model "$f" --output_raw <<< "$name" \
+            | pacat --volume=65536 --format=s16le --rate="$rate" --channels=1
+        found=1
+    done
+    [[ $found -eq 0 ]] && die "no models installed - run tts-manage download MODEL first"
+}
+
 cmd_update() {
     info "updating scripts from repo..."
     curl -fL "${REPO_RAW}/tts-manage.sh"   -o ~/.local/bin/tts-manage   && chmod +x ~/.local/bin/tts-manage
@@ -199,6 +215,7 @@ case "$1" in
     switch)       [[ $# -lt 2 ]] && die "usage: tts-manage switch MODEL"; cmd_switch "$2" ;;
     download)     [[ $# -lt 2 ]] && die "usage: tts-manage download MODEL"; cmd_download "$2" ;;
     download-all) cmd_download_all "${2:-}" ;;
+    test-all)     cmd_test_all ;;
     remove)       [[ $# -lt 2 ]] && die "usage: tts-manage remove MODEL"; cmd_remove "$2" ;;
     update)       cmd_update ;;
     uninstall)    cmd_uninstall ;;
