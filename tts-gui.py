@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, json, threading
+import sys, subprocess, json, threading, time
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -8,13 +8,14 @@ from PyQt6.QtWidgets import (
     QInputDialog
 )
 from PyQt6.QtGui import QIcon, QAction
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QMetaObject
+from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage, QDBusObjectPath, QDBusVariant, QDBus
 
 PIPER_DIR = Path.home() / ".local/share/piper"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
 
-# ── helpers ─────────────────────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────────────
 
 def get_active():
     try:
@@ -104,7 +105,75 @@ class UpdateWorker(QThread):
         self.done.emit(ok)
 
 
-# ── speak dialog ────────────────────────────────────────────────────────────────────────────
+# ── XDG global shortcuts portal ──────────────────────────────────────────────────────────────────
+
+class XDGShortcutManager(QObject):
+    triggered = pyqtSignal()
+
+    _DEST  = "org.freedesktop.portal.Desktop"
+    _PATH  = "/org/freedesktop/portal/desktop"
+    _IFACE = "org.freedesktop.portal.GlobalShortcuts"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bus = QDBusConnection.sessionBus()
+        self._session_path = None
+        ts = str(int(time.time()))
+        self._htok = f"tts_h{ts}"
+        self._stok = f"tts_s{ts}"
+
+    def start(self):
+        iface = QDBusInterface(self._DEST, self._PATH, self._IFACE, self._bus)
+        if not iface.isValid():
+            return False
+        sender = self._bus.baseService()[1:].replace(".", "_")
+        req_path = f"/org/freedesktop/portal/desktop/request/{sender}/{self._htok}"
+        self._bus.connect(self._DEST, req_path, "org.freedesktop.portal.Request",
+                          "Response", self._on_session)
+        msg = QDBusMessage.createMethodCall(self._DEST, self._PATH, self._IFACE, "CreateSession")
+        msg.setArguments([{
+            "handle_token":         QDBusVariant("s", self._htok),
+            "session_handle_token": QDBusVariant("s", self._stok),
+        }])
+        self._bus.call(msg, QDBus.CallMode.NoBlock)
+        return True
+
+    def _on_session(self, response, results):
+        if response != 0:
+            return
+        self._session_path = results.get("session_handle", "")
+        btok = f"tts_b{int(time.time())}"
+        sender = self._bus.baseService()[1:].replace(".", "_")
+        bind_req = f"/org/freedesktop/portal/desktop/request/{sender}/{btok}"
+        self._bus.connect(self._DEST, bind_req, "org.freedesktop.portal.Request",
+                          "Response", lambda r, res: None)
+        self._bus.connect(self._DEST, self._session_path, self._IFACE,
+                          "Activated", self._on_activated)
+        msg = QDBusMessage.createMethodCall(self._DEST, self._PATH, self._IFACE, "BindShortcuts")
+        msg.setArguments([
+            QDBusObjectPath(self._session_path),
+            [("tts-speak", {
+                "description":       QDBusVariant("s", "TTS Speak"),
+                "preferred_trigger": QDBusVariant("s", "CTRL+PRINT"),
+            })],
+            "",
+            {"handle_token": QDBusVariant("s", btok)},
+        ])
+        self._bus.call(msg, QDBus.CallMode.NoBlock)
+
+    def _on_activated(self, session_handle, shortcut_id, timestamp, options):
+        if shortcut_id == "tts-speak":
+            self.triggered.emit()
+
+    def stop(self):
+        if self._session_path:
+            iface = QDBusInterface(self._DEST, self._session_path,
+                                   "org.freedesktop.portal.Session", self._bus)
+            iface.call("Close")
+            self._session_path = None
+
+
+# ── speak dialog ───────────────────────────────────────────────────────────────────────────────
 
 class SpeakDialog(QDialog):
     def __init__(self, parent=None):
@@ -137,7 +206,7 @@ class SpeakDialog(QDialog):
         self.accept()
 
 
-# ── main window ────────────────────────────────────────────────────────────────────────────
+# ── main window ───────────────────────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -336,45 +405,47 @@ class MainWindow(QMainWindow):
             pass
 
     def _register_shortcut(self):
+        self._shortcut_mgr = XDGShortcutManager(self)
+        self._shortcut_mgr.triggered.connect(self._tray_speak)
+        if not self._shortcut_mgr.start():
+            self._register_kde_shortcut()
+
+    def _register_kde_shortcut(self):
         cfg = Path.home() / ".config/kglobalshortcutsrc"
         try:
             lines = cfg.read_text().splitlines() if cfg.exists() else []
-            section = "net.local.tts-speak.desktop"
+            section = "[services][net.local.tts-speak.desktop]"
             new_lines = []
             in_section = False
             for line in lines:
-                if line.strip() == f"[{section}]":
+                if line.strip() == section:
                     in_section = True
                     continue
                 if in_section and line.startswith("["):
                     in_section = False
                 if not in_section:
                     new_lines.append(line)
-            new_lines += [
-                f"[{section}]",
-                "_k_friendly_name=TTS Speak",
-                "tts-speak=Ctrl+Print,none,TTS Speak",
-                "",
-            ]
+            new_lines += [section, "_k_friendly_name=TTS Speak",
+                          "tts-speak=Ctrl+Print,none,TTS Speak", ""]
             cfg.write_text("\n".join(new_lines) + "\n")
         except Exception:
             pass
-        subprocess.Popen(
-            ["qdbus", "org.kde.kglobalaccel", "/kglobalaccel",
-             "org.kde.KGlobalAccel.loadComponent", "net.local.tts-speak.desktop"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        qdbus = "qdbus6" if subprocess.run(["which", "qdbus6"], capture_output=True).returncode == 0 else "qdbus"
+        subprocess.Popen([qdbus, "org.kde.kglobalaccel", "/kglobalaccel",
+                          "org.kde.KGlobalAccel.loadComponent", "net.local.tts-speak.desktop"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _unregister_shortcut(self):
+        if hasattr(self, "_shortcut_mgr"):
+            self._shortcut_mgr.stop()
         cfg = Path.home() / ".config/kglobalshortcutsrc"
         try:
             if cfg.exists():
                 lines = cfg.read_text().splitlines()
-                section = "net.local.tts-speak.desktop"
-                new_lines = []
-                in_section = False
+                section = "[services][net.local.tts-speak.desktop]"
+                new_lines, in_section = [], False
                 for line in lines:
-                    if line.strip() == f"[{section}]":
+                    if line.strip() == section:
                         in_section = True
                         continue
                     if in_section and line.startswith("["):
@@ -384,11 +455,10 @@ class MainWindow(QMainWindow):
                 cfg.write_text("\n".join(new_lines) + "\n")
         except Exception:
             pass
-        subprocess.Popen(
-            ["qdbus", "org.kde.kglobalaccel", "/kglobalaccel",
-             "org.kde.KGlobalAccel.unloadComponent", "net.local.tts-speak.desktop"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        qdbus = "qdbus6" if subprocess.run(["which", "qdbus6"], capture_output=True).returncode == 0 else "qdbus"
+        subprocess.Popen([qdbus, "org.kde.kglobalaccel", "/kglobalaccel",
+                          "org.kde.KGlobalAccel.unloadComponent", "net.local.tts-speak.desktop"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _quit_app(self):
         self._unregister_shortcut()
