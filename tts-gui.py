@@ -132,8 +132,8 @@ class XDGShortcutManager(QObject):
                           "Response", self._on_session)
         msg = QDBusMessage.createMethodCall(self._DEST, self._PATH, self._IFACE, "CreateSession")
         msg.setArguments([{
-            "handle_token":         QDBusVariant("s", self._htok),
-            "session_handle_token": QDBusVariant("s", self._stok),
+            "handle_token":         QDBusVariant(self._htok),
+            "session_handle_token": QDBusVariant(self._stok),
         }])
         self._bus.call(msg, QDBus.CallMode.NoBlock)
         return True
@@ -150,11 +150,11 @@ class XDGShortcutManager(QObject):
         msg.setArguments([
             QDBusObjectPath(self._session_path),
             [("tts-speak", {
-                "description":       QDBusVariant("s", "TTS Speak"),
-                "preferred_trigger": QDBusVariant("s", "CTRL+PRINT"),
+                "description":       QDBusVariant("TTS Speak"),
+                "preferred_trigger": QDBusVariant("CTRL+PRINT"),
             })],
             "",
-            {"handle_token": QDBusVariant("s", btok)},
+            {"handle_token": QDBusVariant(btok)},
         ])
         self._bus.call(msg, QDBus.CallMode.NoBlock)
 
