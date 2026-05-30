@@ -310,5 +310,12 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    import sys
     PIPER_DIR.mkdir(parents=True, exist_ok=True)
-    App().mainloop()
+    if len(sys.argv) > 1 and sys.argv[1] == "--speak":
+        root = tk.Tk()
+        root.withdraw()
+        d = SpeakDialog(root)
+        root.wait_window(d)
+    else:
+        App().mainloop()
