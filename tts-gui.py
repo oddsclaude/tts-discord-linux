@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QInputDialog
 )
 from PyQt6.QtGui import QIcon, QAction
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QMetaObject
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QMetaObject, pyqtSlot
 from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage, QDBusObjectPath, QDBusVariant, QDBus
 
 PIPER_DIR = Path.home() / ".local/share/piper"
@@ -138,15 +138,12 @@ class XDGShortcutManager(QObject):
         self._bus.call(msg, QDBus.CallMode.NoBlock)
         return True
 
+    @pyqtSlot("uint", "QVariantMap")
     def _on_session(self, response, results):
         if response != 0:
             return
         self._session_path = results.get("session_handle", "")
         btok = f"tts_b{int(time.time())}"
-        sender = self._bus.baseService()[1:].replace(".", "_")
-        bind_req = f"/org/freedesktop/portal/desktop/request/{sender}/{btok}"
-        self._bus.connect(self._DEST, bind_req, "org.freedesktop.portal.Request",
-                          "Response", lambda r, res: None)
         self._bus.connect(self._DEST, self._session_path, self._IFACE,
                           "Activated", self._on_activated)
         msg = QDBusMessage.createMethodCall(self._DEST, self._PATH, self._IFACE, "BindShortcuts")
@@ -161,6 +158,7 @@ class XDGShortcutManager(QObject):
         ])
         self._bus.call(msg, QDBus.CallMode.NoBlock)
 
+    @pyqtSlot("QDBusObjectPath", str, "qulonglong", "QVariantMap")
     def _on_activated(self, session_handle, shortcut_id, timestamp, options):
         if shortcut_id == "tts-speak":
             self.triggered.emit()
@@ -225,11 +223,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(w)
         layout = QVBoxLayout(w)
 
-        # Active model label
         self.active_label = QLabel("Active: none")
         layout.addWidget(self.active_label)
 
-        # Speak row
         speak_row = QHBoxLayout()
         speak_row.addWidget(QLabel("Say:"))
         self.speak_edit = QLineEdit()
@@ -243,14 +239,12 @@ class MainWindow(QMainWindow):
         speak_row.addWidget(say_btn)
         layout.addLayout(speak_row)
 
-        # Model list
         layout.addWidget(QLabel("Installed models:"))
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(200)
         self.model_list.itemDoubleClicked.connect(self._switch)
         layout.addWidget(self.model_list)
 
-        # Buttons
         btn_row = QHBoxLayout()
         for label, slot in [
             ("Switch", self._switch),
