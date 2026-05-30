@@ -1,5 +1,4 @@
 #!/bin/bash
-echo "tts-speak is deprecated - use tts-gui or tts-gui --speak" >&2
 MODEL=$(cat "$HOME/.local/share/piper/active_model" 2>/dev/null || echo "$HOME/.local/share/piper/en_US-lessac-medium.onnx")
 RATE=$(cat "$HOME/.local/share/piper/active_rate" 2>/dev/null || echo "22050")
 
