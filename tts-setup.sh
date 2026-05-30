@@ -48,7 +48,9 @@ while [[ $# -gt 0 ]]; do
         --distro)      FORCE_DISTRO="$2"; shift 2 ;;
         --voice)       VOICE_MODEL="$2"; shift 2 ;;
         --list-voices) list_voices; exit 0 ;;
-        *) die "unknown argument: $1\nusage: tts-setup.sh [--distro arch|debian|fedora|gentoo] [--voice MODEL] [--list-voices]\nexample: tts-setup.sh --voice en_GB-alan-medium" ;;
+        *) die "unknown argument: $1
+usage: tts-setup.sh [--distro arch|debian|fedora|gentoo] [--voice MODEL] [--list-voices]
+example: tts-setup.sh --voice en_GB-alan-medium" ;;
     esac
 done
 
@@ -96,6 +98,28 @@ install_piper_binary() {
     sudo ln -sf /opt/piper-tts/piper /usr/local/bin/piper-tts
 }
 
+info "installing python3 GUI deps (tk, pillow, pystray)..."
+case "$DISTRO" in
+    arch)
+        sudo pacman -S --noconfirm --needed tk python-pillow 2>/dev/null || true
+        if   command -v paru &>/dev/null; then paru -S --noconfirm --needed python-pystray 2>/dev/null || true
+        elif command -v yay  &>/dev/null; then yay  -S --noconfirm --needed python-pystray 2>/dev/null || true
+        else pip install --user pystray 2>/dev/null || true
+        fi
+        ;;
+    debian)
+        sudo apt-get install -y python3-tk python3-pil 2>/dev/null || true
+        pip install --user pystray 2>/dev/null || true
+        ;;
+    fedora)
+        sudo dnf install -y python3-tkinter python3-pillow 2>/dev/null || true
+        pip install --user pystray 2>/dev/null || true
+        ;;
+    gentoo)
+        pip install --user pystray pillow 2>/dev/null || true
+        ;;
+esac
+
 info "installing piper-tts..."
 case "$DISTRO" in
     arch)
@@ -134,17 +158,16 @@ mkdir -p ~/.local/bin
 
 REPO_RAW="https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
-info "installing tts-manage..."
-curl -fL "${REPO_RAW}/tts-manage.sh" -o ~/.local/bin/tts-manage
-chmod +x ~/.local/bin/tts-manage
+info "installing scripts..."
+curl -fL "${REPO_RAW}/tts-manage.sh"            -o ~/.local/bin/tts-manage   && chmod +x ~/.local/bin/tts-manage
+curl -fL "${REPO_RAW}/tts-mic-init.sh"           -o ~/.local/bin/tts-mic-init && chmod +x ~/.local/bin/tts-mic-init
+curl -fL "${REPO_RAW}/tts-speak.sh"              -o ~/.local/bin/tts-speak    && chmod +x ~/.local/bin/tts-speak
+curl -fL "${REPO_RAW}/tts-gui.py"                -o ~/.local/bin/tts-gui      && chmod +x ~/.local/bin/tts-gui
 
-info "installing tts-mic-init..."
-curl -fL "${REPO_RAW}/tts-mic-init.sh" -o ~/.local/bin/tts-mic-init
-chmod +x ~/.local/bin/tts-mic-init
-
-info "installing tts-speak..."
-curl -fL "${REPO_RAW}/tts-speak.sh" -o ~/.local/bin/tts-speak
-chmod +x ~/.local/bin/tts-speak
+info "installing desktop entry..."
+mkdir -p ~/.local/share/applications
+curl -fL "${REPO_RAW}/tts-discord-linux.desktop" -o ~/.local/share/applications/tts-discord-linux.desktop
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 INIT="$(basename "$(readlink /proc/1/exe)" 2>/dev/null || cat /proc/1/comm)"
 if echo "$INIT" | grep -qi systemd; then
@@ -182,6 +205,7 @@ fi
 info "done!"
 echo ""
 echo "  virtual mic : TTS_Virtual_Mic  (set as Discord input device)"
+echo "  gui         : tts-gui  (or launch from app menu)"
 echo "  speak script: ~/.local/bin/tts-speak"
 echo "  active voice: $VOICE_MODEL"
 echo ""
