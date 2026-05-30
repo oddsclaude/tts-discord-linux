@@ -14,7 +14,7 @@ PIPER_DIR = Path.home() / ".local/share/piper"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
 
-# ── helpers ─────────────────────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def get_active():
     try:
@@ -57,7 +57,7 @@ def switch_model(model):
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
 
-# ── worker threads ────────────────────────────────────────────────────────────────────────────
+# ── worker threads ────────────────────────────────────────────────────────────────
 
 class SpeakWorker(QThread):
     def __init__(self, text, to_mic):
@@ -104,7 +104,7 @@ class UpdateWorker(QThread):
         self.done.emit(ok)
 
 
-# ── speak dialog ────────────────────────────────────────────────────────────────────────────
+# ── speak dialog ──────────────────────────────────────────────────────────────
 
 class SpeakDialog(QDialog):
     def __init__(self, parent=None):
@@ -137,7 +137,7 @@ class SpeakDialog(QDialog):
         self.accept()
 
 
-# ── main window ────────────────────────────────────────────────────────────────────────────
+# ── main window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -148,19 +148,15 @@ class MainWindow(QMainWindow):
         self._build()
         self._setup_tray()
         self.refresh()
-        self._start_pipewire()
-        self._register_shortcut()
 
     def _build(self):
         w = QWidget()
         self.setCentralWidget(w)
         layout = QVBoxLayout(w)
 
-        # Active model label
         self.active_label = QLabel("Active: none")
         layout.addWidget(self.active_label)
 
-        # Speak row
         speak_row = QHBoxLayout()
         speak_row.addWidget(QLabel("Say:"))
         self.speak_edit = QLineEdit()
@@ -174,21 +170,19 @@ class MainWindow(QMainWindow):
         speak_row.addWidget(say_btn)
         layout.addLayout(speak_row)
 
-        # Model list
         layout.addWidget(QLabel("Installed models:"))
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(200)
         self.model_list.itemDoubleClicked.connect(self._switch)
         layout.addWidget(self.model_list)
 
-        # Buttons
         btn_row = QHBoxLayout()
         for label, slot in [
-            ("Switch", self._switch),
-            ("Test",   self._test),
+            ("Switch",   self._switch),
+            ("Test",     self._test),
             ("Download", self._download),
-            ("Remove", self._remove),
-            ("Update", self._update),
+            ("Remove",   self._remove),
+            ("Update",   self._update),
         ]:
             b = QPushButton(label)
             b.clicked.connect(slot)
@@ -206,7 +200,7 @@ class MainWindow(QMainWindow):
         open_action = QAction("Open", self)
         open_action.triggered.connect(self._show_window)
         quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(self._quit_app)
+        quit_action.triggered.connect(QApplication.quit)
         menu.addAction(say_action)
         menu.addAction(open_action)
         menu.addSeparator()
@@ -317,83 +311,6 @@ class MainWindow(QMainWindow):
         w.done.connect(lambda ok: self.status.setText("updated" if ok else "update failed"))
         self._workers.append(w)
         w.start()
-
-    def _start_pipewire(self):
-        mic_init = Path.home() / ".local/bin/tts-mic-init"
-        if mic_init.exists():
-            subprocess.Popen([str(mic_init)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    def _stop_pipewire(self):
-        try:
-            result = subprocess.run(["pactl", "list", "short", "modules"],
-                                    capture_output=True, text=True)
-            for line in result.stdout.splitlines():
-                if "tts_sink" in line or "tts_mic" in line:
-                    mod_id = line.split()[0]
-                    subprocess.run(["pactl", "unload-module", mod_id],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-
-    def _register_shortcut(self):
-        cfg = Path.home() / ".config/kglobalshortcutsrc"
-        try:
-            lines = cfg.read_text().splitlines() if cfg.exists() else []
-            section = "net.local.tts-speak.desktop"
-            new_lines = []
-            in_section = False
-            for line in lines:
-                if line.strip() == f"[{section}]":
-                    in_section = True
-                    continue
-                if in_section and line.startswith("["):
-                    in_section = False
-                if not in_section:
-                    new_lines.append(line)
-            new_lines += [
-                f"[{section}]",
-                "_k_friendly_name=TTS Speak",
-                "tts-speak=Ctrl+Print,none,TTS Speak",
-                "",
-            ]
-            cfg.write_text("\n".join(new_lines) + "\n")
-        except Exception:
-            pass
-        subprocess.Popen(
-            ["qdbus", "org.kde.kglobalaccel", "/kglobalaccel",
-             "org.kde.KGlobalAccel.loadComponent", "net.local.tts-speak.desktop"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-    def _unregister_shortcut(self):
-        cfg = Path.home() / ".config/kglobalshortcutsrc"
-        try:
-            if cfg.exists():
-                lines = cfg.read_text().splitlines()
-                section = "net.local.tts-speak.desktop"
-                new_lines = []
-                in_section = False
-                for line in lines:
-                    if line.strip() == f"[{section}]":
-                        in_section = True
-                        continue
-                    if in_section and line.startswith("["):
-                        in_section = False
-                    if not in_section:
-                        new_lines.append(line)
-                cfg.write_text("\n".join(new_lines) + "\n")
-        except Exception:
-            pass
-        subprocess.Popen(
-            ["qdbus", "org.kde.kglobalaccel", "/kglobalaccel",
-             "org.kde.KGlobalAccel.unloadComponent", "net.local.tts-speak.desktop"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-    def _quit_app(self):
-        self._unregister_shortcut()
-        self._stop_pipewire()
-        QApplication.quit()
 
 
 if __name__ == "__main__":

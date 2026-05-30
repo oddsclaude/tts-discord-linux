@@ -3,27 +3,30 @@ set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info() { echo -e "${GREEN}[tts-manage]${NC} $*"; }
+warn() { echo -e "${YELLOW}[tts-manage]${NC} $*"; }
 die()  { echo -e "${RED}[tts-manage] error:${NC} $*" >&2; exit 1; }
 
 PIPER_DIR="$HOME/.local/share/piper"
 VOICE_URL_BASE_ROOT="https://huggingface.co/rhasspy/piper-voices/resolve/main"
-
 REPO_RAW="https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
 usage() {
     echo "usage: tts-manage <command>"
     echo ""
-    echo "  status              show active voice and installed models"
-    echo "  switch MODEL        switch active voice (downloads if needed)"
-    echo "  download MODEL      download a voice model without switching"
-    echo "  remove MODEL        delete a downloaded voice model"
-    echo "  list                list installed voice models"
+    echo "  status                 show active voice and installed models"
+    echo "  switch MODEL           switch active voice (downloads if needed)"
+    echo "  download MODEL         download a voice model without switching"
     echo "  download-all [FILTER]  download all voices (optional grep filter e.g. en_US)"
     echo "  test-all               play each installed model saying its own name"
-    echo "  update              update scripts to latest from repo"
-    echo "  uninstall           remove everything (scripts, service, models)"
+    echo "  remove MODEL           delete a downloaded voice model"
+    echo "  list                   list installed voice models"
+    echo "  update                 update scripts to latest from repo"
+    echo "  uninstall              remove everything (scripts, service, models)"
     echo ""
-    echo "example: tts-manage switch en_GB-alan-medium"
+    echo "examples:"
+    echo "  tts-manage switch en_GB-alan-medium"
+    echo "  tts-manage download-all en_US"
+    echo "  tts-manage download-all          # all voices (several GB)"
 }
 
 parse_voice_url() {
@@ -114,26 +117,27 @@ data = json.load(sys.stdin)
 for key in sorted(data.keys()):
     print(key)
 ")
-    local total filtered=0 downloaded=0
+    local total downloaded=0
     total=$(echo "$models" | wc -l)
 
     if [[ -n "$filter" ]]; then
-        info "filtering to models matching: $filter"
         models=$(echo "$models" | grep "$filter" || true)
-        filtered=$(echo "$models" | wc -l)
-        info "matched $filtered of $total models"
+        local matched
+        matched=$(echo "$models" | grep -c . || true)
+        info "filter '$filter' matched $matched of $total models"
     else
-        warn "downloading ALL $total voice models - this will use several GB"
+        warn "downloading ALL $total voice models - this will use several GB of disk space"
         read -rp "Continue? [y/N] " confirm
         [[ "$confirm" =~ ^[Yy]$ ]] || { echo "cancelled"; exit 0; }
     fi
 
+    mkdir -p "$PIPER_DIR"
     while IFS= read -r model; do
         [[ -z "$model" ]] && continue
         if [[ -f "${PIPER_DIR}/${model}.onnx" ]]; then
-            echo "  skip $model (already downloaded)"
+            echo "  skip $model (exists)"
         else
-            echo -n "  downloading $model... "
+            echo -n "  $model... "
             local base_url
             base_url=$(parse_voice_url "$model")
             if curl -fsSL "${base_url}.onnx"      -o "${PIPER_DIR}/${model}.onnx" \
@@ -147,7 +151,7 @@ for key in sorted(data.keys()):
         fi
     done <<< "$models"
 
-    info "done - downloaded $downloaded new models"
+    info "done - $downloaded new models downloaded"
 }
 
 cmd_test_all() {
@@ -181,6 +185,8 @@ cmd_uninstall() {
     echo -e "${RED}This will remove:${NC}"
     echo "  ~/.local/bin/tts-speak"
     echo "  ~/.local/bin/tts-mic-init"
+    echo "  ~/.local/bin/tts-manage"
+    echo "  ~/.local/bin/tts-gui"
     echo "  ~/.local/share/piper/ (all voice models)"
     echo "  ~/.config/systemd/user/tts-mic.service"
     echo "  ~/.config/autostart/tts-mic.desktop"
@@ -188,31 +194,38 @@ cmd_uninstall() {
     read -rp "Are you sure? [y/N] " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "cancelled"; exit 0; }
 
-    # Unload PulseAudio/PipeWire modules
-    pactl list short modules | awk '/tts_sink|tts_mic/{print $1}' | xargs -r pactl unload-module
+    if systemctl --user is-enabled tts-mic.service &>/dev/null; then
+        systemctl --user disable --now tts-mic.service
+    fi
+
+    pactl unload-module "$(pactl list short modules | awk '/tts_mic/{print $1}')" 2>/dev/null || true
+    pactl unload-module "$(pactl list short modules | awk '/tts_sink/{print $1}')" 2>/dev/null || true
 
     rm -f ~/.local/bin/tts-speak
     rm -f ~/.local/bin/tts-mic-init
+    rm -f ~/.local/bin/tts-manage
     rm -f ~/.local/bin/tts-gui
     rm -f ~/.local/share/applications/tts-discord-linux.desktop
+    rm -f ~/.config/systemd/user/tts-mic.service
     rm -f ~/.config/autostart/tts-mic.desktop
     rm -rf "${PIPER_DIR}"
     update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
+    systemctl --user daemon-reload 2>/dev/null || true
     info "uninstalled"
 }
 
 [[ $# -eq 0 ]] && { usage; exit 0; }
 
 case "$1" in
-    status)   cmd_status ;;
-    list)     cmd_list ;;
-    switch)   [[ $# -lt 2 ]] && die "usage: tts-manage switch MODEL"; cmd_switch "$2" ;;
-    download) [[ $# -lt 2 ]] && die "usage: tts-manage download MODEL"; cmd_download "$2" ;;
-    remove)   [[ $# -lt 2 ]] && die "usage: tts-manage remove MODEL"; cmd_remove "$2" ;;
+    status)       cmd_status ;;
+    list)         cmd_list ;;
+    switch)       [[ $# -lt 2 ]] && die "usage: tts-manage switch MODEL"; cmd_switch "$2" ;;
+    download)     [[ $# -lt 2 ]] && die "usage: tts-manage download MODEL"; cmd_download "$2" ;;
     download-all) cmd_download_all "${2:-}" ;;
     test-all)     cmd_test_all ;;
-    update)    cmd_update ;;
-    uninstall) cmd_uninstall ;;
-    *) die "unknown command: $1"; usage ;;
+    remove)       [[ $# -lt 2 ]] && die "usage: tts-manage remove MODEL"; cmd_remove "$2" ;;
+    update)       cmd_update ;;
+    uninstall)    cmd_uninstall ;;
+    *) usage; die "unknown command: $1" ;;
 esac

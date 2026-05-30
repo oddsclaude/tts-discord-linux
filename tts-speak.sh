@@ -1,4 +1,5 @@
 #!/bin/bash
+echo "tts-speak is deprecated - use tts-gui or tts-gui --speak" >&2
 MODEL=$(cat "$HOME/.local/share/piper/active_model" 2>/dev/null || echo "$HOME/.local/share/piper/en_US-lessac-medium.onnx")
 RATE=$(cat "$HOME/.local/share/piper/active_rate" 2>/dev/null || echo "22050")
 
@@ -8,8 +9,6 @@ if [[ $# -gt 0 ]]; then
         | tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate="$RATE" --channels=1) \
         | pacat --volume=65536 --format=s16le --rate="$RATE" --channels=1
 else
-    echo "tts-speak is deprecated - use tts-gui or tts-gui --speak" >&2
-    # Use tts-gui --speak for the dialog if available, else fallback
     if command -v tts-gui &>/dev/null; then
         exec tts-gui --speak
     elif command -v kdialog &>/dev/null; then

@@ -54,14 +54,13 @@ example: tts-setup.sh --voice en_GB-alan-medium" ;;
     esac
 done
 
-# Parse voice name into URL components: en_US-lessac-medium -> en/en_US/lessac/medium/
 parse_voice() {
     local model="$1"
-    local lang_region="${model%%-*}"                  # en_US
-    local rest="${model#*-}"                           # lessac-medium
-    local quality="${rest##*-}"                        # medium
-    local voice="${rest%-*}"                           # lessac
-    local lang="${lang_region%%_*}"                    # en
+    local lang_region="${model%%-*}"
+    local rest="${model#*-}"
+    local quality="${rest##*-}"
+    local voice="${rest%-*}"
+    local lang="${lang_region%%_*}"
     VOICE_URL_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${lang_region}/${voice}/${quality}"
 }
 
@@ -99,19 +98,25 @@ install_piper_binary() {
     sudo ln -sf /opt/piper-tts/piper /usr/local/bin/piper-tts
 }
 
-info "installing python3 GUI deps (PyQt6)..."
+info "installing python3 GUI deps (tk, pillow, pystray)..."
 case "$DISTRO" in
     arch)
-        sudo pacman -S --noconfirm --needed python-pyqt6 2>/dev/null || true
+        sudo pacman -S --noconfirm --needed tk python-pillow 2>/dev/null || true
+        if   command -v paru &>/dev/null; then paru -S --noconfirm --needed python-pystray 2>/dev/null || true
+        elif command -v yay  &>/dev/null; then yay  -S --noconfirm --needed python-pystray 2>/dev/null || true
+        else pip install --user pystray 2>/dev/null || true
+        fi
         ;;
     debian)
-        sudo apt-get install -y python3-pyqt6 2>/dev/null || true
+        sudo apt-get install -y python3-tk python3-pil 2>/dev/null || true
+        pip install --user pystray 2>/dev/null || true
         ;;
     fedora)
-        sudo dnf install -y python3-pyqt6 2>/dev/null || true
+        sudo dnf install -y python3-tkinter python3-pillow 2>/dev/null || true
+        pip install --user pystray 2>/dev/null || true
         ;;
     gentoo)
-        pip install --user PyQt6 2>/dev/null || true
+        pip install --user pystray pillow 2>/dev/null || true
         ;;
 esac
 
@@ -145,15 +150,11 @@ else
     info "voice model already present, skipping"
 fi
 
-# Store active model path for tts-speak
 echo "$HOME/.local/share/piper/${VOICE_MODEL}.onnx" > ~/.local/share/piper/active_model
-
-# Get sample rate from model config (piper voices vary: 22050, 16000, etc.)
-SAMPLE_RATE=$(python3 -c "import json,sys; d=json.load(open('$HOME/.local/share/piper/${VOICE_MODEL}.onnx.json')); print(d['audio']['sample_rate'])" 2>/dev/null || echo "22050")
+SAMPLE_RATE=$(python3 -c "import json; d=json.load(open('$HOME/.local/share/piper/${VOICE_MODEL}.onnx.json')); print(d['audio']['sample_rate'])" 2>/dev/null || echo "22050")
 echo "$SAMPLE_RATE" > ~/.local/share/piper/active_rate
 
 mkdir -p ~/.local/bin
-
 
 REPO_RAW="https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
@@ -168,17 +169,53 @@ mkdir -p ~/.local/share/applications
 curl -fL "${REPO_RAW}/tts-discord-linux.desktop" -o ~/.local/share/applications/tts-discord-linux.desktop
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
-# tts-gui manages the virtual mic lifecycle on startup and exit
+INIT="$(basename "$(readlink /proc/1/exe)" 2>/dev/null || cat /proc/1/comm)"
+if echo "$INIT" | grep -qi systemd; then
+    info "writing systemd user service..."
+    mkdir -p ~/.config/systemd/user
+    cat > ~/.config/systemd/user/tts-mic.service << 'EOF'
+[Unit]
+Description=TTS Virtual Microphone
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.local/bin/tts-mic-init
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now tts-mic.service
+else
+    info "non-systemd init detected ($INIT), using XDG autostart..."
+    mkdir -p ~/.config/autostart
+    cat > ~/.config/autostart/tts-mic.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=TTS Virtual Microphone
+Exec=/bin/bash -c "$HOME/.local/bin/tts-mic-init"
+X-GNOME-Autostart-enabled=true
+EOF
+    ~/.local/bin/tts-mic-init
+fi
 
 info "done!"
 echo ""
 echo "  virtual mic : TTS_Virtual_Mic  (set as Discord input device)"
-echo "  speak script: ~/.local/bin/tts-speak (CLI) or tts-gui (GUI, manages mic lifecycle)"
+echo "  gui         : tts-gui  (or launch from app menu)"
+echo "  speak script: ~/.local/bin/tts-speak"
 echo "  active voice: $VOICE_MODEL"
 echo ""
 echo "  to switch voices: tts-manage switch MODEL"
 echo "  to list installed: tts-manage list"
 echo "  to uninstall:     tts-manage uninstall"
 echo "  available voices: tts-setup.sh --list-voices"
+echo ""
+echo "  KDE keybind : System Settings -> Shortcuts -> Custom Shortcuts"
+echo "                New -> Global Shortcut -> Command/URL"
+echo "                action: $HOME/.local/bin/tts-speak"
 echo ""
 echo "  restart Discord to see the new input device"
