@@ -38,7 +38,3 @@ After install, set **TTS_Virtual_Mic** as your input device in Discord voice set
 System Settings - Shortcuts - Custom Shortcuts - New - Global Shortcut - Command/URL
 
 Set action to: `~/.local/bin/tts-speak`
-
-## Credits
-
-- [gn_u](https://github.com/gn_u) - pointed out OpenRC compatibility
