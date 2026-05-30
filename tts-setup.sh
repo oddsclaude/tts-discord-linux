@@ -2,21 +2,67 @@
 set -euo pipefail
 
 PIPER_VERSION="2023.11.14-2"
-VOICE_MODEL="en_US-lessac-medium"
-VOICE_URL_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium"
+DEFAULT_VOICE="en_US-lessac-medium"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info() { echo -e "${GREEN}[tts-setup]${NC} $*"; }
 warn() { echo -e "${YELLOW}[tts-setup]${NC} $*"; }
 die()  { echo -e "${RED}[tts-setup] error:${NC} $*" >&2; exit 1; }
 
+list_voices() {
+    echo -e "${CYAN}Available voice models:${NC}"
+    echo ""
+    echo "  English (US):"
+    echo "    en_US-lessac-low        en_US-lessac-medium     en_US-lessac-high"
+    echo "    en_US-ryan-low          en_US-ryan-medium       en_US-ryan-high"
+    echo "    en_US-amy-low           en_US-amy-medium"
+    echo "    en_US-joe-medium        en_US-norman-medium"
+    echo "    en_US-hfc_female-medium en_US-hfc_male-medium"
+    echo "    en_US-libritts_r-medium en_US-kusal-medium"
+    echo ""
+    echo "  English (GB):"
+    echo "    en_GB-alan-low          en_GB-alan-medium"
+    echo "    en_GB-cori-medium       en_GB-cori-high"
+    echo "    en_GB-jenny_dioco-medium"
+    echo "    en_GB-northern_english_male-medium"
+    echo "    en_GB-southern_english_female-low"
+    echo ""
+    echo "  German:"
+    echo "    de_DE-thorsten-low      de_DE-thorsten-medium   de_DE-thorsten-high"
+    echo "    de_DE-kerstin-low       de_DE-eva_k-x_low"
+    echo ""
+    echo "  French:"
+    echo "    fr_FR-upmc-medium       fr_FR-mls-medium"
+    echo ""
+    echo "  Spanish:"
+    echo "    es_ES-carlfm-low        es_ES-carlfm-medium"
+    echo "    es_MX-ald-medium"
+    echo ""
+    echo "  More voices: https://huggingface.co/rhasspy/piper-voices"
+}
+
 FORCE_DISTRO=""
+VOICE_MODEL="$DEFAULT_VOICE"
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --distro) FORCE_DISTRO="$2"; shift 2 ;;
-        *) die "unknown argument: $1 (usage: tts-setup.sh [--distro arch|debian|fedora|gentoo])" ;;
+        --distro)      FORCE_DISTRO="$2"; shift 2 ;;
+        --voice)       VOICE_MODEL="$2"; shift 2 ;;
+        --list-voices) list_voices; exit 0 ;;
+        *) die "unknown argument: $1\nusage: tts-setup.sh [--distro arch|debian|fedora|gentoo] [--voice MODEL] [--list-voices]\nexample: tts-setup.sh --voice en_GB-alan-medium" ;;
     esac
 done
+
+parse_voice() {
+    local model="$1"
+    local lang_region="${model%%-*}"
+    local rest="${model#*-}"
+    local quality="${rest##*-}"
+    local voice="${rest%-*}"
+    local lang="${lang_region%%_*}"
+    VOICE_URL_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${lang_region}/${voice}/${quality}"
+}
+
+parse_voice "$VOICE_MODEL"
 
 if [[ -n "$FORCE_DISTRO" ]]; then
     DISTRO="$FORCE_DISTRO"
@@ -40,7 +86,7 @@ case "$ARCH" in
     *) die "unsupported architecture: $ARCH" ;;
 esac
 
-info "distro: $DISTRO | arch: $ARCH"
+info "distro: $DISTRO | arch: $ARCH | voice: $VOICE_MODEL"
 
 install_piper_binary() {
     local url="https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_${PIPER_ARCH}.tar.gz"
@@ -80,42 +126,24 @@ else
     info "voice model already present, skipping"
 fi
 
+echo "$HOME/.local/share/piper/${VOICE_MODEL}.onnx" > ~/.local/share/piper/active_model
+SAMPLE_RATE=$(python3 -c "import json; d=json.load(open('$HOME/.local/share/piper/${VOICE_MODEL}.onnx.json')); print(d['audio']['sample_rate'])" 2>/dev/null || echo "22050")
+echo "$SAMPLE_RATE" > ~/.local/share/piper/active_rate
+
 mkdir -p ~/.local/bin
 
-info "writing tts-mic-init..."
-cat > ~/.local/bin/tts-mic-init << 'EOF'
-#!/bin/bash
-pactl list short modules | grep -q tts_sink || \
-    pactl load-module module-null-sink sink_name=tts_sink \
-        sink_properties=device.description="TTS_Virtual_Sink"
+REPO_RAW="https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
-pactl list short modules | grep -q tts_mic || \
-    pactl load-module module-virtual-source source_name=tts_mic \
-        source_properties=device.description="TTS_Virtual_Mic" \
-        master=tts_sink.monitor
-EOF
+info "installing tts-manage..."
+curl -fL "${REPO_RAW}/tts-manage.sh" -o ~/.local/bin/tts-manage
+chmod +x ~/.local/bin/tts-manage
+
+info "installing tts-mic-init..."
+curl -fL "${REPO_RAW}/tts-mic-init.sh" -o ~/.local/bin/tts-mic-init
 chmod +x ~/.local/bin/tts-mic-init
 
-info "writing tts-speak..."
-cat > ~/.local/bin/tts-speak << 'EOF'
-#!/bin/bash
-MODEL="$HOME/.local/share/piper/en_US-lessac-medium.onnx"
-
-if [[ $# -gt 0 ]]; then
-    TEXT="$*"
-else
-    if   command -v kdialog &>/dev/null; then TEXT=$(kdialog --title "TTS" --inputbox "Say:")
-    elif command -v zenity  &>/dev/null; then TEXT=$(zenity --entry --title "TTS" --text "Say:")
-    elif command -v rofi    &>/dev/null; then TEXT=$(echo "" | rofi -dmenu -p "Say:")
-    else read -rp "Say: " TEXT
-    fi
-fi
-[[ -z "${TEXT:-}" ]] && exit 0
-
-piper-tts --model "$MODEL" --output_raw <<< "$TEXT" \
-    | tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate=22050 --channels=1) \
-    | pacat --volume=65536 --format=s16le --rate=22050 --channels=1
-EOF
+info "installing tts-speak..."
+curl -fL "${REPO_RAW}/tts-speak.sh" -o ~/.local/bin/tts-speak
 chmod +x ~/.local/bin/tts-speak
 
 INIT="$(basename "$(readlink /proc/1/exe)" 2>/dev/null || cat /proc/1/comm)"
@@ -155,6 +183,13 @@ info "done!"
 echo ""
 echo "  virtual mic : TTS_Virtual_Mic  (set as Discord input device)"
 echo "  speak script: ~/.local/bin/tts-speak"
+echo "  active voice: $VOICE_MODEL"
+echo ""
+echo "  to switch voices: tts-manage switch MODEL"
+echo "  to list installed: tts-manage list"
+echo "  to uninstall:     tts-manage uninstall"
+echo "  available voices: tts-setup.sh --list-voices"
+echo ""
 echo "  KDE keybind : System Settings -> Shortcuts -> Custom Shortcuts"
 echo "                New -> Global Shortcut -> Command/URL"
 echo "                action: $HOME/.local/bin/tts-speak"

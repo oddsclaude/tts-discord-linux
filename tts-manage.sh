@@ -7,6 +7,7 @@ die()  { echo -e "${RED}[tts-manage] error:${NC} $*" >&2; exit 1; }
 
 PIPER_DIR="$HOME/.local/share/piper"
 VOICE_URL_BASE_ROOT="https://huggingface.co/rhasspy/piper-voices/resolve/main"
+REPO_RAW="https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
 usage() {
     echo "usage: tts-manage <command>"
@@ -16,6 +17,7 @@ usage() {
     echo "  download MODEL      download a voice model without switching"
     echo "  remove MODEL        delete a downloaded voice model"
     echo "  list                list installed voice models"
+    echo "  update              update scripts to latest from repo"
     echo "  uninstall           remove everything (scripts, service, models)"
     echo ""
     echo "example: tts-manage switch en_GB-alan-medium"
@@ -97,6 +99,14 @@ cmd_remove() {
     info "removed $model"
 }
 
+cmd_update() {
+    info "updating scripts from repo..."
+    curl -fL "${REPO_RAW}/tts-manage.sh"   -o ~/.local/bin/tts-manage   && chmod +x ~/.local/bin/tts-manage
+    curl -fL "${REPO_RAW}/tts-speak.sh"    -o ~/.local/bin/tts-speak    && chmod +x ~/.local/bin/tts-speak
+    curl -fL "${REPO_RAW}/tts-mic-init.sh" -o ~/.local/bin/tts-mic-init && chmod +x ~/.local/bin/tts-mic-init
+    info "update complete - voice models and settings unchanged"
+}
+
 cmd_uninstall() {
     echo -e "${RED}This will remove:${NC}"
     echo "  ~/.local/bin/tts-speak"
@@ -135,6 +145,7 @@ case "$1" in
     switch)    [[ $# -lt 2 ]] && die "usage: tts-manage switch MODEL"; cmd_switch "$2" ;;
     download)  [[ $# -lt 2 ]] && die "usage: tts-manage download MODEL"; cmd_download "$2" ;;
     remove)    [[ $# -lt 2 ]] && die "usage: tts-manage remove MODEL"; cmd_remove "$2" ;;
+    update)    cmd_update ;;
     uninstall) cmd_uninstall ;;
     *) usage; die "unknown command: $1" ;;
 esac
