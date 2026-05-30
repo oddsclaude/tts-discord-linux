@@ -189,8 +189,8 @@ class App(tk.Tk):
 
     def _start_tray(self):
         menu = pystray.Menu(
-            pystray.MenuItem("Open",  lambda: self.after(0, self._show_window), default=True),
-            pystray.MenuItem("Say...", lambda: self.after(0, self._tray_speak)),
+            pystray.MenuItem("Say...", lambda: self.after(0, self._tray_speak), default=True),
+            pystray.MenuItem("Open",  lambda: self.after(0, self._show_window)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",  lambda: self.after(0, self._quit)),
         )
