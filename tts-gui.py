@@ -75,6 +75,18 @@ def download_model(model, on_done=None):
     threading.Thread(target=_dl, daemon=True).start()
 
 def make_tray_icon():
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+        theme = Gtk.IconTheme.get_default()
+        pixbuf = theme.load_icon("audio-headset", 64, 0)
+        data = pixbuf.get_pixels()
+        w, h = pixbuf.get_width(), pixbuf.get_height()
+        mode = "RGBA" if pixbuf.get_has_alpha() else "RGB"
+        return Image.frombytes(mode, (w, h), data, "raw", mode, pixbuf.get_rowstride())
+    except Exception:
+        pass
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse([20, 4, 44, 36], fill="#89b4fa")
