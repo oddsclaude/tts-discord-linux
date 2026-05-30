@@ -171,9 +171,13 @@ cmd_test_all() {
 
 cmd_update() {
     info "updating scripts from repo..."
-    curl -fL "${REPO_RAW}/tts-manage.sh"   -o ~/.local/bin/tts-manage   && chmod +x ~/.local/bin/tts-manage
-    curl -fL "${REPO_RAW}/tts-speak.sh"    -o ~/.local/bin/tts-speak    && chmod +x ~/.local/bin/tts-speak
-    curl -fL "${REPO_RAW}/tts-mic-init.sh" -o ~/.local/bin/tts-mic-init && chmod +x ~/.local/bin/tts-mic-init
+    curl -fL "${REPO_RAW}/tts-manage.sh"            -o ~/.local/bin/tts-manage   && chmod +x ~/.local/bin/tts-manage
+    curl -fL "${REPO_RAW}/tts-speak.sh"             -o ~/.local/bin/tts-speak    && chmod +x ~/.local/bin/tts-speak
+    curl -fL "${REPO_RAW}/tts-mic-init.sh"          -o ~/.local/bin/tts-mic-init && chmod +x ~/.local/bin/tts-mic-init
+    curl -fL "${REPO_RAW}/tts-gui.py"               -o ~/.local/bin/tts-gui      && chmod +x ~/.local/bin/tts-gui
+    mkdir -p ~/.local/share/applications
+    curl -fL "${REPO_RAW}/tts-discord-linux.desktop" -o ~/.local/share/applications/tts-discord-linux.desktop
+    update-desktop-database ~/.local/share/applications 2>/dev/null || true
     info "update complete - voice models and settings unchanged"
 }
 
@@ -182,6 +186,7 @@ cmd_uninstall() {
     echo "  ~/.local/bin/tts-speak"
     echo "  ~/.local/bin/tts-mic-init"
     echo "  ~/.local/bin/tts-manage"
+    echo "  ~/.local/bin/tts-gui"
     echo "  ~/.local/share/piper/ (all voice models)"
     echo "  ~/.config/systemd/user/tts-mic.service"
     echo "  ~/.config/autostart/tts-mic.desktop"
@@ -199,9 +204,12 @@ cmd_uninstall() {
     rm -f ~/.local/bin/tts-speak
     rm -f ~/.local/bin/tts-mic-init
     rm -f ~/.local/bin/tts-manage
+    rm -f ~/.local/bin/tts-gui
+    rm -f ~/.local/share/applications/tts-discord-linux.desktop
     rm -f ~/.config/systemd/user/tts-mic.service
     rm -f ~/.config/autostart/tts-mic.desktop
     rm -rf "${PIPER_DIR}"
+    update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
     systemctl --user daemon-reload 2>/dev/null || true
     info "uninstalled"
