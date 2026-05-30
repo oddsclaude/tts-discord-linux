@@ -80,7 +80,7 @@ else
     info "voice model already present, skipping"
 fi
 
-mkdir -p ~/.local/bin ~/.config/systemd/user
+mkdir -p ~/.local/bin
 
 info "writing tts-mic-init..."
 cat > ~/.local/bin/tts-mic-init << 'EOF'
@@ -114,8 +114,11 @@ piper-tts --model "$MODEL" --output_raw <<< "$TEXT" \
 EOF
 chmod +x ~/.local/bin/tts-speak
 
-info "writing systemd user service..."
-cat > ~/.config/systemd/user/tts-mic.service << 'EOF'
+INIT="$(basename "$(readlink /proc/1/exe)" 2>/dev/null || cat /proc/1/comm)"
+if echo "$INIT" | grep -qi systemd; then
+    info "writing systemd user service..."
+    mkdir -p ~/.config/systemd/user
+    cat > ~/.config/systemd/user/tts-mic.service << 'EOF'
 [Unit]
 Description=TTS Virtual Microphone
 After=pipewire-pulse.service
@@ -129,9 +132,20 @@ ExecStart=%h/.local/bin/tts-mic-init
 [Install]
 WantedBy=default.target
 EOF
-
-systemctl --user daemon-reload
-systemctl --user enable --now tts-mic.service
+    systemctl --user daemon-reload
+    systemctl --user enable --now tts-mic.service
+else
+    info "non-systemd init detected ($INIT), using XDG autostart..."
+    mkdir -p ~/.config/autostart
+    cat > ~/.config/autostart/tts-mic.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=TTS Virtual Microphone
+Exec=/bin/bash -c "$HOME/.local/bin/tts-mic-init"
+X-GNOME-Autostart-enabled=true
+EOF
+    ~/.local/bin/tts-mic-init
+fi
 
 info "done!"
 echo ""
