@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-import subprocess, json, threading
+import sys, subprocess, json, threading
 from pathlib import Path
-try:
-    import pystray
-    from PIL import Image, ImageDraw
-    HAS_TRAY = True
-except ImportError:
-    HAS_TRAY = False
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
+    QCheckBox, QDialog, QSystemTrayIcon, QMenu, QAction, QMessageBox,
+    QInputDialog
+)
+from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 PIPER_DIR = Path.home() / ".local/share/piper"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
-BG, FG, ACC, BTN = "#1e1e2e", "#cdd6f4", "#89b4fa", "#313244"
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def get_active():
     try:
@@ -57,265 +56,273 @@ def switch_model(model):
     (PIPER_DIR / "active_model").write_text(str(PIPER_DIR / f"{model}.onnx"))
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
-def download_model(model, on_done=None):
-    def _dl():
-        lang_region, rest = model.split("-", 1)
+
+# ── worker threads ────────────────────────────────────────────────────────────
+
+class SpeakWorker(QThread):
+    def __init__(self, text, to_mic):
+        super().__init__()
+        self.text, self.to_mic = text, to_mic
+    def run(self):
+        speak_text(self.text, self.to_mic)
+
+class DownloadWorker(QThread):
+    done = pyqtSignal(bool, str)
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+    def run(self):
+        m = self.model
+        lang_region, rest = m.split("-", 1)
         quality = rest.rsplit("-", 1)[-1]
         voice   = rest.rsplit("-", 1)[0]
         lang    = lang_region.split("_")[0]
-        base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{lang_region}/{voice}/{quality}/{model}"
+        base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{lang_region}/{voice}/{quality}/{m}"
         try:
-            subprocess.run(["curl", "-fL", f"{base}.onnx",      "-o", str(PIPER_DIR / f"{model}.onnx")],  check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", f"{base}.onnx.json", "-o", str(PIPER_DIR / f"{model}.onnx.json")], check=True, capture_output=True)
-            if on_done: on_done(True, model)
+            subprocess.run(["curl", "-fL", f"{base}.onnx",      "-o", str(PIPER_DIR / f"{m}.onnx")],  check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", f"{base}.onnx.json", "-o", str(PIPER_DIR / f"{m}.onnx.json")], check=True, capture_output=True)
+            self.done.emit(True, m)
         except subprocess.CalledProcessError:
-            (PIPER_DIR / f"{model}.onnx").unlink(missing_ok=True)
-            (PIPER_DIR / f"{model}.onnx.json").unlink(missing_ok=True)
-            if on_done: on_done(False, model)
-    threading.Thread(target=_dl, daemon=True).start()
+            (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
+            (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
+            self.done.emit(False, m)
 
-def make_tray_icon():
-    try:
-        import gi
-        gi.require_version("Gtk", "3.0")
-        from gi.repository import Gtk
-        theme = Gtk.IconTheme.get_default()
-        pixbuf = theme.load_icon("audio-headset", 64, 0)
-        data = pixbuf.get_pixels()
-        w, h = pixbuf.get_width(), pixbuf.get_height()
-        mode = "RGBA" if pixbuf.get_has_alpha() else "RGB"
-        return Image.frombytes(mode, (w, h), data, "raw", mode, pixbuf.get_rowstride())
-    except Exception:
-        pass
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse([20, 4, 44, 36], fill="#89b4fa")
-    d.rectangle([28, 36, 36, 48], fill="#89b4fa")
-    d.arc([16, 30, 48, 54], 0, 180, fill="#89b4fa", width=4)
-    d.line([32, 54, 32, 60], fill="#89b4fa", width=4)
-    d.line([22, 60, 42, 60], fill="#89b4fa", width=4)
-    return img
+class UpdateWorker(QThread):
+    done = pyqtSignal(bool)
+    def run(self):
+        files = [("tts-manage.sh","tts-manage"),("tts-speak.sh","tts-speak"),
+                 ("tts-mic-init.sh","tts-mic-init"),("tts-gui.py","tts-gui")]
+        bin_dir = Path.home() / ".local/bin"
+        ok = True
+        for src, dst in files:
+            try:
+                subprocess.run(["curl", "-fL", f"{REPO_RAW}/{src}", "-o", str(bin_dir/dst)],
+                               check=True, capture_output=True)
+                (bin_dir/dst).chmod(0o755)
+            except subprocess.CalledProcessError:
+                ok = False
+        self.done.emit(ok)
 
 
-# ── speak popup ──────────────────────────────────────────────────────────────
+# ── speak dialog ──────────────────────────────────────────────────────────────
 
-class SpeakDialog(tk.Toplevel):
+class SpeakDialog(QDialog):
     def __init__(self, parent=None):
-        if parent:
-            super().__init__(parent)
-        else:
-            self._root = tk.Tk()
-            self._root.withdraw()
-            super().__init__(self._root)
-        self.title("Say")
-        self.configure(bg=BG, padx=12, pady=10)
-        self.resizable(False, False)
-        self.attributes("-topmost", True)
+        super().__init__(parent)
+        self.setWindowTitle("TTS")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self._worker = None
 
-        tk.Label(self, text="Say:", bg=BG, fg=FG).pack(side="left")
-        self.entry = tk.Entry(self, width=34, bg=BTN, fg=FG, insertbackground=FG, relief="flat")
-        self.entry.pack(side="left", padx=6)
-        self.entry.focus()
-        self.entry.bind("<Return>", self._say)
-        self.entry.bind("<Escape>", lambda _: self.destroy())
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Say:"))
+        self.edit = QLineEdit()
+        self.edit.setMinimumWidth(300)
+        row.addWidget(self.edit)
+        self.mic = QCheckBox("mic")
+        self.mic.setChecked(True)
+        row.addWidget(self.mic)
+        btn = QPushButton("Say")
+        btn.clicked.connect(self._say)
+        row.addWidget(btn)
 
-        self.mic_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(self, text="mic", variable=self.mic_var, bg=BG, fg=FG,
-                       selectcolor=BTN, activebackground=BG, relief="flat").pack(side="left")
-        tk.Button(self, text="Say", command=self._say, bg=BTN, fg=FG, relief="flat",
-                  activebackground="#45475a").pack(side="left", padx=(4,0))
+        self.setLayout(row)
+        self.edit.returnPressed.connect(self._say)
+        self.edit.setFocus()
 
-    def _say(self, *_):
-        text = self.entry.get().strip()
+    def _say(self):
+        text = self.edit.text().strip()
         if text:
-            threading.Thread(target=speak_text, args=(text, self.mic_var.get()), daemon=True).start()
-        self.destroy()
+            self._worker = SpeakWorker(text, self.mic.isChecked())
+            self._worker.start()
+        self.accept()
 
 
-# ── main window ──────────────────────────────────────────────────────────────
+# ── main window ───────────────────────────────────────────────────────────────
 
-class App(tk.Tk):
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("TTS Manager")
-        self.resizable(False, False)
-        self.configure(padx=12, pady=12, bg=BG)
-        self._tray = None
+        self.setWindowTitle("TTS Manager")
+        self.setWindowIcon(QIcon.fromTheme("audio-headset"))
+        self._workers = []
         self._build()
+        self._setup_tray()
         self.refresh()
-        if HAS_TRAY:
-            self._start_tray()
-            self.protocol("WM_DELETE_WINDOW", self.withdraw)
-        else:
-            self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _build(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TLabel",    background=BG, foreground=FG)
-        style.configure("TButton",   background=BTN, foreground=FG, relief="flat", padding=4)
-        style.map("TButton",         background=[("active", "#45475a")])
-        style.configure("TEntry",    fieldbackground=BTN, foreground=FG, insertcolor=FG)
-        style.configure("TFrame",    background=BG)
-        style.configure("TCheckbutton", background=BG, foreground=FG)
+        w = QWidget()
+        self.setCentralWidget(w)
+        layout = QVBoxLayout(w)
 
-        ttk.Label(self, text="Active:", foreground=ACC).grid(row=0, column=0, sticky="w")
-        self.active_var = tk.StringVar(value="none")
-        ttk.Label(self, textvariable=self.active_var).grid(row=0, column=1, columnspan=4, sticky="w", padx=(6,0))
+        self.active_label = QLabel("Active: none")
+        layout.addWidget(self.active_label)
 
-        ttk.Label(self, text="Say:").grid(row=1, column=0, sticky="w", pady=(10,0))
-        self.speak_entry = ttk.Entry(self, width=34)
-        self.speak_entry.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(10,0), padx=(6,4))
-        self.speak_entry.bind("<Return>", lambda _: self._speak())
-        self.mic_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(self, text="mic", variable=self.mic_var, bg=BG, fg=FG,
-                       selectcolor=BTN, activebackground=BG, relief="flat").grid(row=1, column=4, pady=(10,0))
-        ttk.Button(self, text="Say", command=self._speak).grid(row=1, column=5, pady=(10,0), padx=(4,0))
+        speak_row = QHBoxLayout()
+        speak_row.addWidget(QLabel("Say:"))
+        self.speak_edit = QLineEdit()
+        self.speak_edit.returnPressed.connect(self._speak)
+        speak_row.addWidget(self.speak_edit)
+        self.mic_check = QCheckBox("mic")
+        self.mic_check.setChecked(True)
+        speak_row.addWidget(self.mic_check)
+        say_btn = QPushButton("Say")
+        say_btn.clicked.connect(self._speak)
+        speak_row.addWidget(say_btn)
+        layout.addLayout(speak_row)
 
-        ttk.Label(self, text="Installed models:").grid(row=2, column=0, columnspan=6, sticky="w", pady=(10,4))
-        frame = ttk.Frame(self)
-        frame.grid(row=3, column=0, columnspan=6, sticky="nsew")
-        self.listbox = tk.Listbox(frame, height=8, width=46, bg=BTN, fg=FG,
-                                  selectbackground=ACC, selectforeground=BG,
-                                  relief="flat", highlightthickness=0, font=("monospace", 10))
-        sb = ttk.Scrollbar(frame, orient="vertical", command=self.listbox.yview)
-        self.listbox.configure(yscrollcommand=sb.set)
-        self.listbox.pack(side="left", fill="both")
-        sb.pack(side="right", fill="y")
-        self.listbox.bind("<Double-Button-1>", lambda _: self._switch())
+        layout.addWidget(QLabel("Installed models:"))
+        self.model_list = QListWidget()
+        self.model_list.setMinimumHeight(200)
+        self.model_list.itemDoubleClicked.connect(self._switch)
+        layout.addWidget(self.model_list)
 
-        bf = ttk.Frame(self)
-        bf.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(8,0))
-        for i, (lbl, cmd) in enumerate([
+        btn_row = QHBoxLayout()
+        for label, slot in [
             ("Switch",   self._switch),
             ("Test",     self._test),
             ("Download", self._download),
             ("Remove",   self._remove),
             ("Update",   self._update),
-        ]):
-            ttk.Button(bf, text=lbl, command=cmd).grid(row=0, column=i, padx=(0,4))
+        ]:
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            btn_row.addWidget(b)
+        layout.addLayout(btn_row)
 
-        self.status_var = tk.StringVar(value="ready")
-        ttk.Label(self, textvariable=self.status_var, foreground="#6c7086").grid(
-            row=5, column=0, columnspan=6, sticky="w", pady=(8,0))
+        self.status = QLabel("ready")
+        layout.addWidget(self.status)
 
-    def _start_tray(self):
-        menu = pystray.Menu(
-            pystray.MenuItem("Say...", lambda: self.after(0, self._tray_speak), default=True),
-            pystray.MenuItem("Open",  lambda: self.after(0, self._show_window)),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit",  lambda: self.after(0, self._quit)),
-        )
-        self._tray = pystray.Icon("tts", make_tray_icon(), "TTS Manager", menu)
-        threading.Thread(target=self._tray.run, daemon=True).start()
+    def _setup_tray(self):
+        self.tray = QSystemTrayIcon(QIcon.fromTheme("audio-headset"), self)
+        menu = QMenu()
+        say_action = QAction("Say...", self)
+        say_action.triggered.connect(self._tray_speak)
+        open_action = QAction("Open", self)
+        open_action.triggered.connect(self._show_window)
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(QApplication.quit)
+        menu.addAction(say_action)
+        menu.addAction(open_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
 
     def _show_window(self):
-        self.deiconify()
-        self.lift()
-        self.focus_force()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            self._tray_speak()
 
     def _tray_speak(self):
-        SpeakDialog(self)
-
-    def _quit(self):
-        if self._tray:
-            self._tray.stop()
-        self.destroy()
+        d = SpeakDialog(self)
+        d.exec_()
 
     def refresh(self):
         active = get_active()
         rate = get_rate(active) if active else "?"
-        self.active_var.set(f"{active}  ({rate} Hz)" if active else "none")
+        self.active_label.setText(f"Active: {active}  ({rate} Hz)" if active else "Active: none")
         models = get_models()
-        self.listbox.delete(0, tk.END)
+        self.model_list.clear()
         for m in models:
-            self.listbox.insert(tk.END, f"{'* ' if m == active else '  '}{m}")
-        if active and active in models:
-            idx = models.index(active)
-            self.listbox.selection_set(idx)
-            self.listbox.see(idx)
+            item = QListWidgetItem(("* " if m == active else "  ") + m)
+            self.model_list.addItem(item)
+            if m == active:
+                self.model_list.setCurrentItem(item)
 
     def _selected(self):
-        sel = self.listbox.curselection()
-        return self.listbox.get(sel[0]).strip().lstrip("* ") if sel else None
+        item = self.model_list.currentItem()
+        return item.text().strip().lstrip("* ") if item else None
 
     def _speak(self):
-        text = self.speak_entry.get().strip()
+        text = self.speak_edit.text().strip()
         if not text:
             return
-        self.speak_entry.delete(0, tk.END)
-        self.status_var.set(f"speaking...")
-        threading.Thread(target=speak_text, args=(text, self.mic_var.get()), daemon=True).start()
-        self.after(2000, lambda: self.status_var.set("ready"))
+        self.speak_edit.clear()
+        self.status.setText("speaking...")
+        w = SpeakWorker(text, self.mic_check.isChecked())
+        w.finished.connect(lambda: self.status.setText("ready"))
+        self._workers.append(w)
+        w.start()
 
     def _switch(self):
         m = self._selected()
-        if not m: return
+        if not m:
+            return
         switch_model(m)
         self.refresh()
-        self.status_var.set(f"switched to {m}")
+        self.status.setText(f"switched to {m}")
 
     def _test(self):
         m = self._selected()
-        if not m: return
+        if not m:
+            return
         old = get_active()
         switch_model(m)
-        self.status_var.set(f"testing {m}...")
+        self.status.setText(f"testing {m}...")
         def _run():
             speak_text(m, to_mic=False)
-            if old: switch_model(old)
-            self.after(0, lambda: (self.refresh(), self.status_var.set("ready")))
-        threading.Thread(target=_run, daemon=True).start()
+            if old:
+                switch_model(old)
+        w = QThread()
+        w.run = _run
+        w.finished.connect(lambda: (self.refresh(), self.status.setText("ready")))
+        self._workers.append(w)
+        w.start()
 
     def _download(self):
-        m = simpledialog.askstring("Download", "Model name (e.g. en_GB-alan-medium):", parent=self)
-        if not m: return
+        m, ok = QInputDialog.getText(self, "Download", "Model name (e.g. en_GB-alan-medium):")
+        if not ok or not m.strip():
+            return
         m = m.strip()
-        self.status_var.set(f"downloading {m}...")
-        def done(ok, name):
-            self.after(0, lambda: (
-                self.refresh(),
-                self.status_var.set(f"downloaded {name}" if ok else f"FAILED: {name}")
-            ))
-        download_model(m, on_done=done)
+        self.status.setText(f"downloading {m}...")
+        w = DownloadWorker(m)
+        def _done(success, name):
+            self.refresh()
+            self.status.setText(f"downloaded {name}" if success else f"FAILED: {name}")
+        w.done.connect(_done)
+        self._workers.append(w)
+        w.start()
 
     def _remove(self):
         m = self._selected()
-        if not m: return
-        if m == get_active():
-            messagebox.showerror("Remove", "Can't remove active model - switch first", parent=self)
+        if not m:
             return
-        if messagebox.askyesno("Remove", f"Delete {m}?", parent=self):
+        if m == get_active():
+            QMessageBox.warning(self, "Remove", "Can't remove active model - switch first")
+            return
+        if QMessageBox.question(self, "Remove", f"Delete {m}?") == QMessageBox.Yes:
             (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
             (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
             self.refresh()
-            self.status_var.set(f"removed {m}")
+            self.status.setText(f"removed {m}")
 
     def _update(self):
-        self.status_var.set("updating...")
-        def _run():
-            files = [("tts-manage.sh","tts-manage"),("tts-speak.sh","tts-speak"),
-                     ("tts-mic-init.sh","tts-mic-init"),("tts-gui.py","tts-gui")]
-            bin_dir = Path.home() / ".local/bin"
-            ok = True
-            for src, dst in files:
-                try:
-                    subprocess.run(["curl", "-fL", f"{REPO_RAW}/{src}", "-o", str(bin_dir/dst)],
-                                   check=True, capture_output=True)
-                    (bin_dir/dst).chmod(0o755)
-                except subprocess.CalledProcessError:
-                    ok = False
-            self.after(0, lambda: self.status_var.set("updated" if ok else "update failed"))
-        threading.Thread(target=_run, daemon=True).start()
+        self.status.setText("updating...")
+        w = UpdateWorker()
+        w.done.connect(lambda ok: self.status.setText("updated" if ok else "update failed"))
+        self._workers.append(w)
+        w.start()
 
 
 if __name__ == "__main__":
-    import sys
     PIPER_DIR.mkdir(parents=True, exist_ok=True)
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
     if len(sys.argv) > 1 and sys.argv[1] == "--speak":
-        root = tk.Tk()
-        root.withdraw()
-        d = SpeakDialog(root)
-        root.wait_window(d)
-    else:
-        App().mainloop()
+        d = SpeakDialog()
+        d.exec_()
+        sys.exit(0)
+
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec_())
