@@ -16,6 +16,7 @@ RVC_DIR        = PIPER_DIR / "rvc"
 FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 BASE_PIPER_FOR_RVC = "en_GB-northern_english_male-medium"
+RVC_VENV_PYTHON = PIPER_DIR / "rvc-env" / "bin" / "python3"
 
 
 # ── helpers ───────────────────────────────────────────────
@@ -98,7 +99,10 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
                 f"r.load_model({repr(pth)}{', index_path=' + repr(idx) if has_idx else ''})\n"
                 f"r.infer_file({repr(tmp_in)}, {repr(tmp_out)})\n"
             )
-            proc = subprocess.run(["python3", "-c", script], capture_output=True, timeout=120)
+            # Use dedicated Python 3.12 venv if present (rvc-python needs numpy<=1.25.3
+            # which can't build on Python 3.13+)
+            py_exe = str(RVC_VENV_PYTHON) if RVC_VENV_PYTHON.exists() else "python3"
+            proc = subprocess.run([py_exe, "-c", script], capture_output=True, timeout=120)
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr.decode(errors="replace")[:200])
             with wave.open(tmp_out, "rb") as wf:
