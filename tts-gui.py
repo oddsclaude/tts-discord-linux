@@ -63,34 +63,55 @@ def get_rvc_models():
         return []
 
 def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
+    """Returns (rvc_ok, error_str). On RVC failure falls back to raw piper audio."""
     tmp_in = tmp_out = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             tmp_in = f.name
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             tmp_out = f.name
+
         result = subprocess.run(
             ["piper-tts", "--model", model_path, "--output_raw"],
             input=text.encode(), capture_output=True
         )
-        with wave.open(tmp_in, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(rate)
-            wf.writeframes(result.stdout)
-        pth = str(RVC_DIR / rvc_name / f"{rvc_name}.pth")
-        idx = str(RVC_DIR / rvc_name / f"{rvc_name}.index")
-        has_idx = Path(idx).exists()
-        script = (
-            "from rvc_python.infer import RVCInference\n"
-            f"r = RVCInference(device='cpu')\n"
-            f"r.load_model({repr(pth)}{', index_path=' + repr(idx) if has_idx else ''})\n"
-            f"r.infer_file({repr(tmp_in)}, {repr(tmp_out)})\n"
-        )
-        subprocess.run(["python3", "-c", script], check=True, capture_output=True)
-        with wave.open(tmp_out, "rb") as wf:
-            out_rate = wf.getframerate()
-            out_pcm  = wf.readframes(wf.getnframes())
+        raw_pcm = result.stdout
+
+        # Default: use raw piper PCM directly (fallback if RVC fails)
+        out_rate = rate
+        out_pcm  = raw_pcm
+        rvc_ok   = False
+        rvc_err  = ""
+
+        try:
+            with wave.open(tmp_in, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(rate)
+                wf.writeframes(raw_pcm)
+            pth = str(RVC_DIR / rvc_name / f"{rvc_name}.pth")
+            idx = str(RVC_DIR / rvc_name / f"{rvc_name}.index")
+            has_idx = Path(idx).exists()
+            script = (
+                "from rvc_python.infer import RVCInference\n"
+                f"r = RVCInference(device='cpu')\n"
+                f"r.load_model({repr(pth)}{', index_path=' + repr(idx) if has_idx else ''})\n"
+                f"r.infer_file({repr(tmp_in)}, {repr(tmp_out)})\n"
+            )
+            proc = subprocess.run(["python3", "-c", script], capture_output=True, timeout=120)
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.decode(errors="replace")[:200])
+            with wave.open(tmp_out, "rb") as wf:
+                out_rate = wf.getframerate()
+                out_pcm  = wf.readframes(wf.getnframes())
+            rvc_ok = True
+        except Exception as e:
+            rvc_err = str(e)[:200]
+            # out_rate / out_pcm already set to piper fallback above
+
+        if not out_pcm:
+            return False, "piper produced no audio"
+
         if to_mic:
             sink = subprocess.Popen(["bash", "-c",
                 f"tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate={out_rate} --channels=1)"
@@ -103,8 +124,9 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
         sink.stdin.write(out_pcm)
         sink.stdin.close()
         sink.wait()
-    except Exception:
-        pass
+        return rvc_ok, rvc_err
+    except Exception as e:
+        return False, str(e)[:200]
     finally:
         if tmp_in:  Path(tmp_in).unlink(missing_ok=True)
         if tmp_out: Path(tmp_out).unlink(missing_ok=True)
@@ -113,12 +135,11 @@ def speak_text(text, to_mic=True):
     active     = get_active()
     active_rvc = get_active_rvc()
     if not active:
-        return
+        return None
     model_path = str(PIPER_DIR / f"{active}.onnx")
     rate       = get_rate(active)
     if active_rvc:
-        _speak_with_rvc(text, to_mic, active_rvc, model_path, rate)
-        return
+        return _speak_with_rvc(text, to_mic, active_rvc, model_path, rate)
     piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if to_mic:
@@ -133,6 +154,7 @@ def speak_text(text, to_mic=True):
     piper.stdin.write(text.encode())
     piper.stdin.close()
     sink.wait()
+    return None
 
 def switch_model(model):
     (PIPER_DIR / "active_model").write_text(str(PIPER_DIR / f"{model}.onnx"))
@@ -142,11 +164,18 @@ def switch_model(model):
 # ── worker threads ──────────────────────────────────────────────
 
 class SpeakWorker(QThread):
+    rvc_failed = pyqtSignal(str)  # emitted when RVC errors but piper fallback is used
+
     def __init__(self, text, to_mic):
         super().__init__()
         self.text, self.to_mic = text, to_mic
+
     def run(self):
-        speak_text(self.text, self.to_mic)
+        result = speak_text(self.text, self.to_mic)
+        if isinstance(result, tuple):
+            rvc_ok, rvc_err = result
+            if not rvc_ok:
+                self.rvc_failed.emit(rvc_err or "rvc-python not installed or inference failed")
 
 class DownloadWorker(QThread):
     done = pyqtSignal(bool, str)
@@ -401,7 +430,6 @@ class DownloadDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # ── Mode ───────────────────────────────────────────────
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
@@ -411,7 +439,6 @@ class DownloadDialog(QDialog):
         layout.addLayout(mode_row)
         layout.addWidget(_hline())
 
-        # ── Official piper voices ─────────────────────────────────
         piper_box = QGroupBox("Official piper voices")
         piper_layout = QVBoxLayout(piper_box)
         lang_row = QHBoxLayout()
@@ -431,7 +458,6 @@ class DownloadDialog(QDialog):
         piper_layout.addWidget(piper_dl_btn)
         layout.addWidget(piper_box)
 
-        # ── Custom URL ───────────────────────────────────────
         custom_box = QGroupBox("Custom URL or model name")
         custom_layout = QVBoxLayout(custom_box)
         custom_row = QHBoxLayout()
@@ -444,7 +470,6 @@ class DownloadDialog(QDialog):
         custom_layout.addLayout(custom_row)
         layout.addWidget(custom_box)
 
-        # ── Characters ────────────────────────────────────────
         chars_box = QGroupBox("Characters")
         chars_row = QHBoxLayout(chars_box)
         self.char_combo = QComboBox()
@@ -456,7 +481,6 @@ class DownloadDialog(QDialog):
         chars_row.addWidget(char_dl_btn)
         layout.addWidget(chars_box)
 
-        # ── Status + Close ───────────────────────────────────────
         self.status_label = QLabel("Ready.")
         layout.addWidget(self.status_label)
         close_btn = QPushButton("Close")
@@ -519,12 +543,9 @@ class DownloadDialog(QDialog):
         self.status_label.setText(f"Downloading {key}...")
         w = DownloadWorker(key)
         def _on_done(ok, name):
-            if not ok:
-                self.status_label.setText(f"FAILED to download {name}.")
-            elif self._is_test_mode():
-                self._maybe_test_and_delete(name, name)
-            else:
-                self.status_label.setText(f"Downloaded {name}.")
+            if not ok: self.status_label.setText(f"FAILED to download {name}.")
+            elif self._is_test_mode(): self._maybe_test_and_delete(name, name)
+            else: self.status_label.setText(f"Downloaded {name}.")
         w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
@@ -538,23 +559,17 @@ class DownloadDialog(QDialog):
             self.status_label.setText("Downloading from URL...")
             w = DirectUrlWorker(text)
             def _on_done(ok, stem):
-                if not ok:
-                    self.status_label.setText(f"FAILED to download {stem}.")
-                elif self._is_test_mode():
-                    self._maybe_test_and_delete(stem, stem)
-                else:
-                    self.status_label.setText(f"Downloaded {stem}.")
+                if not ok: self.status_label.setText(f"FAILED to download {stem}.")
+                elif self._is_test_mode(): self._maybe_test_and_delete(stem, stem)
+                else: self.status_label.setText(f"Downloaded {stem}.")
             w.done.connect(_on_done)
         else:
             self.status_label.setText(f"Downloading {text}...")
             w = DownloadWorker(text)
             def _on_done(ok, name):
-                if not ok:
-                    self.status_label.setText(f"FAILED to download {name}.")
-                elif self._is_test_mode():
-                    self._maybe_test_and_delete(name, name)
-                else:
-                    self.status_label.setText(f"Downloaded {name}.")
+                if not ok: self.status_label.setText(f"FAILED to download {name}.")
+                elif self._is_test_mode(): self._maybe_test_and_delete(name, name)
+                else: self.status_label.setText(f"Downloaded {name}.")
             w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
@@ -597,7 +612,6 @@ class MainWindow(QMainWindow):
         self.active_label = QLabel("Active: none")
         layout.addWidget(self.active_label)
 
-        # RVC selector row
         rvc_row = QHBoxLayout()
         rvc_row.addWidget(QLabel("RVC:"))
         self.rvc_combo = QComboBox()
@@ -652,19 +666,14 @@ class MainWindow(QMainWindow):
         reload_action = QAction("Reload models", self); reload_action.triggered.connect(self.refresh)
         restart_action= QAction("Restart",       self); restart_action.triggered.connect(self._restart)
         quit_action   = QAction("Quit",          self); quit_action.triggered.connect(QApplication.quit)
-        menu.addAction(say_action)
-        menu.addAction(open_action)
-        menu.addAction(reload_action)
-        menu.addAction(restart_action)
-        menu.addSeparator()
-        menu.addAction(quit_action)
+        menu.addAction(say_action); menu.addAction(open_action); menu.addAction(reload_action)
+        menu.addAction(restart_action); menu.addSeparator(); menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.show()
 
     def closeEvent(self, event):
-        event.ignore()
-        self.hide()
+        event.ignore(); self.hide()
 
     def _show_window(self):
         self.show(); self.raise_(); self.activateWindow()
@@ -685,7 +694,6 @@ class MainWindow(QMainWindow):
         rate   = get_rate(active) if active else "?"
         self.active_label.setText(f"Active: {active}  ({rate} Hz)" if active else "Active: none")
 
-        # Rebuild RVC combo without triggering _on_rvc_changed
         self.rvc_combo.blockSignals(True)
         current_rvc = get_active_rvc()
         self.rvc_combo.clear()
@@ -715,7 +723,6 @@ class MainWindow(QMainWindow):
             set_active_rvc(None)
             self.status.setText("RVC disabled")
             return
-        # Ensure base piper voice is installed
         base = BASE_PIPER_FOR_RVC
         if not (PIPER_DIR / f"{base}.onnx").exists():
             self.status.setText(f"Downloading base voice for RVC ({base})...")
@@ -773,6 +780,7 @@ class MainWindow(QMainWindow):
         self.status.setText("speaking...")
         w = SpeakWorker(text, self.mic_check.isChecked())
         w.finished.connect(lambda: self.status.setText("ready"))
+        w.rvc_failed.connect(lambda err: self.status.setText(f"RVC failed (piper used): {err[:80]}"))
         self._workers.append(w)
         w.start()
 

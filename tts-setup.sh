@@ -98,7 +98,7 @@ install_piper_binary() {
     sudo ln -sf /opt/piper-tts/piper /usr/local/bin/piper-tts
 }
 
-info "installing python3 GUI deps (tk, pillow, pystray)..."
+info "installing python3 GUI deps (PyQt6, rvc-python)..."
 case "$DISTRO" in
     arch)
         sudo pacman -S --noconfirm --needed tk python-pillow 2>/dev/null || true
@@ -119,6 +119,9 @@ case "$DISTRO" in
         pip install --user pystray pillow 2>/dev/null || true
         ;;
 esac
+
+info "installing rvc-python (for RVC voice conversion)..."
+pip install --user rvc-python 2>/dev/null || warn "rvc-python install failed - RVC features will use piper fallback"
 
 info "installing piper-tts..."
 case "$DISTRO" in
