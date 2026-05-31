@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, json, threading, tarfile, tempfile
+import sys, subprocess, json, threading, tarfile, tempfile, wave
 from pathlib import Path
 from urllib.request import urlopen, Request
 from PyQt6.QtWidgets import (
@@ -12,8 +12,10 @@ from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 PIPER_DIR      = Path.home() / ".local/share/piper"
+RVC_DIR        = PIPER_DIR / "rvc"
 FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
+BASE_PIPER_FOR_RVC = "en_GB-northern_english_male-medium"
 
 
 # ── helpers ───────────────────────────────────────────────
@@ -42,13 +44,82 @@ def get_rate(model):
     except:
         return 22050
 
+def get_active_rvc():
+    try:
+        v = (RVC_DIR / "active_rvc").read_text().strip()
+        return v if v else None
+    except:
+        return None
+
+def set_active_rvc(name):
+    RVC_DIR.mkdir(parents=True, exist_ok=True)
+    (RVC_DIR / "active_rvc").write_text(name or "")
+
+def get_rvc_models():
+    try:
+        return sorted(d.name for d in RVC_DIR.iterdir()
+                      if d.is_dir() and (d / f"{d.name}.pth").exists())
+    except:
+        return []
+
+def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
+    tmp_in = tmp_out = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            tmp_in = f.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            tmp_out = f.name
+        result = subprocess.run(
+            ["piper-tts", "--model", model_path, "--output_raw"],
+            input=text.encode(), capture_output=True
+        )
+        with wave.open(tmp_in, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(result.stdout)
+        pth = str(RVC_DIR / rvc_name / f"{rvc_name}.pth")
+        idx = str(RVC_DIR / rvc_name / f"{rvc_name}.index")
+        has_idx = Path(idx).exists()
+        script = (
+            "from rvc_python.infer import RVCInference\n"
+            f"r = RVCInference(device='cpu')\n"
+            f"r.load_model({repr(pth)}{', index_path=' + repr(idx) if has_idx else ''})\n"
+            f"r.infer_file({repr(tmp_in)}, {repr(tmp_out)})\n"
+        )
+        subprocess.run(["python3", "-c", script], check=True, capture_output=True)
+        with wave.open(tmp_out, "rb") as wf:
+            out_rate = wf.getframerate()
+            out_pcm  = wf.readframes(wf.getnframes())
+        if to_mic:
+            sink = subprocess.Popen(["bash", "-c",
+                f"tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate={out_rate} --channels=1)"
+                f" | pacat --volume=65536 --format=s16le --rate={out_rate} --channels=1"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            sink = subprocess.Popen(
+                ["pacat", "--volume=65536", "--format=s16le", f"--rate={out_rate}", "--channels=1"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        sink.stdin.write(out_pcm)
+        sink.stdin.close()
+        sink.wait()
+    except Exception:
+        pass
+    finally:
+        if tmp_in:  Path(tmp_in).unlink(missing_ok=True)
+        if tmp_out: Path(tmp_out).unlink(missing_ok=True)
+
 def speak_text(text, to_mic=True):
-    active = get_active()
+    active     = get_active()
+    active_rvc = get_active_rvc()
     if not active:
         return
-    model = str(PIPER_DIR / f"{active}.onnx")
-    rate = get_rate(active)
-    piper = subprocess.Popen(["piper-tts", "--model", model, "--output_raw"],
+    model_path = str(PIPER_DIR / f"{active}.onnx")
+    rate       = get_rate(active)
+    if active_rvc:
+        _speak_with_rvc(text, to_mic, active_rvc, model_path, rate)
+        return
+    piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if to_mic:
         sink = subprocess.Popen(["bash", "-c",
@@ -98,14 +169,33 @@ class DownloadWorker(QThread):
             (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
             self.done.emit(False, m)
 
+class BaseVoiceEnsureWorker(QThread):
+    done = pyqtSignal(bool)
+    def run(self):
+        m = BASE_PIPER_FOR_RVC
+        if (PIPER_DIR / f"{m}.onnx").exists():
+            self.done.emit(True)
+            return
+        lang_region, rest = m.split("-", 1)
+        quality = rest.rsplit("-", 1)[-1]
+        voice   = rest.rsplit("-", 1)[0]
+        lang    = lang_region.split("_")[0]
+        base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{lang_region}/{voice}/{quality}/{m}"
+        try:
+            subprocess.run(["curl", "-fL", "--max-time", "300", f"{base}.onnx",      "-o", str(PIPER_DIR / f"{m}.onnx")],  check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "60",  f"{base}.onnx.json", "-o", str(PIPER_DIR / f"{m}.onnx.json")], check=True, capture_output=True)
+            self.done.emit(True)
+        except subprocess.CalledProcessError:
+            (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
+            (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
+            self.done.emit(False)
+
 class TestAndDeleteWorker(QThread):
     done = pyqtSignal(str)
-
     def __init__(self, stem, phrase):
         super().__init__()
         self.stem = stem
         self.phrase = phrase
-
     def run(self):
         old_active = get_active()
         try:
@@ -120,51 +210,41 @@ class TestAndDeleteWorker(QThread):
 
 class GladosWorker(QThread):
     done = pyqtSignal(bool, str)
-
     ONNX_URL = "https://github.com/dnhkng/GLaDOS/releases/download/0.1/glados.onnx"
     JSON_URL = "https://raw.githubusercontent.com/dnhkng/GlaDOS/main/models/TTS/glados.json"
-
     def run(self):
         onnx_dest = PIPER_DIR / "glados.onnx"
         json_dest = PIPER_DIR / "glados.onnx.json"
         try:
-            subprocess.run(["curl", "-fL", "--max-time", "300", self.ONNX_URL, "-o", str(onnx_dest)],
-                           check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", "--max-time", "60", self.JSON_URL, "-o", str(json_dest)],
-                           check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "300", self.ONNX_URL, "-o", str(onnx_dest)], check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "60",  self.JSON_URL, "-o", str(json_dest)], check=True, capture_output=True)
             self.done.emit(True, "")
         except subprocess.CalledProcessError as e:
             onnx_dest.unlink(missing_ok=True)
             json_dest.unlink(missing_ok=True)
-            err = e.stderr.decode(errors="replace")[:200] if e.stderr else "unknown error"
-            self.done.emit(False, err)
+            self.done.emit(False, e.stderr.decode(errors="replace")[:200] if e.stderr else "unknown error")
 
 class Hal9000Worker(QThread):
     done = pyqtSignal(bool, str)
     ONNX_URL = "https://huggingface.co/campwill/HAL-9000-Piper-TTS/resolve/main/hal.onnx"
     JSON_URL = "https://huggingface.co/campwill/HAL-9000-Piper-TTS/resolve/main/hal.onnx.json"
     STEM = "hal9000"
-
     def run(self):
         onnx_dest = PIPER_DIR / f"{self.STEM}.onnx"
         json_dest = PIPER_DIR / f"{self.STEM}.onnx.json"
         try:
-            subprocess.run(["curl", "-fL", "--max-time", "300", self.ONNX_URL, "-o", str(onnx_dest)],
-                           check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", "--max-time", "60",  self.JSON_URL, "-o", str(json_dest)],
-                           check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "300", self.ONNX_URL, "-o", str(onnx_dest)], check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "60",  self.JSON_URL, "-o", str(json_dest)], check=True, capture_output=True)
             self.done.emit(True, "")
         except subprocess.CalledProcessError as e:
             onnx_dest.unlink(missing_ok=True)
             json_dest.unlink(missing_ok=True)
-            err = e.stderr.decode(errors="replace")[:200] if e.stderr else "unknown error"
-            self.done.emit(False, err)
+            self.done.emit(False, e.stderr.decode(errors="replace")[:200] if e.stderr else "unknown error")
 
 class TrumpWorker(QThread):
     done = pyqtSignal(bool, str)
     ARCHIVE_URL = "https://huggingface.co/BibEBobberson/Piper/resolve/main/Donald%20Trump.tar.gz"
     STEM = "trump"
-
     def run(self):
         onnx_dest = PIPER_DIR / f"{self.STEM}.onnx"
         json_dest = PIPER_DIR / f"{self.STEM}.onnx.json"
@@ -172,42 +252,50 @@ class TrumpWorker(QThread):
         try:
             with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tf:
                 tmp_archive = Path(tf.name)
-            subprocess.run(
-                ["curl", "-fL", "--max-time", "300", self.ARCHIVE_URL, "-o", str(tmp_archive)],
-                check=True, capture_output=True
-            )
+            subprocess.run(["curl", "-fL", "--max-time", "300", self.ARCHIVE_URL, "-o", str(tmp_archive)], check=True, capture_output=True)
             with tarfile.open(tmp_archive, "r:gz") as tar:
                 members = tar.getmembers()
                 onnx_members = [m for m in members if m.name.endswith(".onnx") and not m.name.endswith(".onnx.json")]
                 json_members = [m for m in members if m.name.endswith(".onnx.json")]
                 if not onnx_members:
                     raise RuntimeError("No .onnx file found in archive")
-                onnx_member = onnx_members[0]
-                onnx_member.name = onnx_dest.name
+                onnx_member = onnx_members[0]; onnx_member.name = onnx_dest.name
                 tar.extract(onnx_member, path=PIPER_DIR)
                 if json_members:
-                    json_member = json_members[0]
-                    json_member.name = json_dest.name
+                    json_member = json_members[0]; json_member.name = json_dest.name
                     tar.extract(json_member, path=PIPER_DIR)
             self.done.emit(True, "")
         except subprocess.CalledProcessError as e:
-            onnx_dest.unlink(missing_ok=True)
-            json_dest.unlink(missing_ok=True)
-            err = e.stderr.decode(errors="replace")[:200] if e.stderr else "curl failed"
-            self.done.emit(False, err)
+            onnx_dest.unlink(missing_ok=True); json_dest.unlink(missing_ok=True)
+            self.done.emit(False, e.stderr.decode(errors="replace")[:200] if e.stderr else "curl failed")
         except (tarfile.TarError, RuntimeError, OSError) as e:
-            onnx_dest.unlink(missing_ok=True)
-            json_dest.unlink(missing_ok=True)
+            onnx_dest.unlink(missing_ok=True); json_dest.unlink(missing_ok=True)
             self.done.emit(False, str(e)[:200])
         finally:
             if tmp_archive and tmp_archive.exists():
                 tmp_archive.unlink(missing_ok=True)
 
+class KingerWorker(QThread):
+    done = pyqtSignal(bool, str)
+    PTH_URL   = "https://huggingface.co/binant/kinger/resolve/main/model.pth"
+    INDEX_URL = "https://huggingface.co/binant/kinger/resolve/main/model.index"
+    NAME = "kinger"
+    def run(self):
+        dest_dir = RVC_DIR / self.NAME
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        pth_dest   = dest_dir / f"{self.NAME}.pth"
+        index_dest = dest_dir / f"{self.NAME}.index"
+        try:
+            subprocess.run(["curl", "-fL", "--max-time", "300", self.PTH_URL,   "-o", str(pth_dest)],   check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "300", self.INDEX_URL, "-o", str(index_dest)], check=True, capture_output=True)
+            self.done.emit(True, "")
+        except subprocess.CalledProcessError as e:
+            pth_dest.unlink(missing_ok=True); index_dest.unlink(missing_ok=True)
+            self.done.emit(False, e.stderr.decode(errors="replace")[:200] if e.stderr else "curl failed")
+
 class VoicesWorker(QThread):
     done = pyqtSignal(dict)
-
     VOICES_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json"
-
     def run(self):
         try:
             req = Request(self.VOICES_URL, headers={"User-Agent": "tts-gui/1.0"})
@@ -219,30 +307,24 @@ class VoicesWorker(QThread):
 
 class DirectUrlWorker(QThread):
     done = pyqtSignal(bool, str)
-
     def __init__(self, url):
         super().__init__()
         self.url = url
-
     def run(self):
         from urllib.parse import urlparse
-        url = self.url
-        parsed = urlparse(url)
+        parsed = urlparse(self.url)
         basename = Path(parsed.path).name
         stem = basename[:-5] if basename.endswith(".onnx") else basename
-        onnx_url = url if url.endswith(".onnx") else url + ".onnx"
+        onnx_url = self.url if self.url.endswith(".onnx") else self.url + ".onnx"
         json_url = onnx_url + ".json"
         onnx_dest = PIPER_DIR / f"{stem}.onnx"
         json_dest = PIPER_DIR / f"{stem}.onnx.json"
         try:
-            subprocess.run(["curl", "-fL", "--max-time", "300", onnx_url, "-o", str(onnx_dest)],
-                           check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", "--max-time", "60",  json_url, "-o", str(json_dest)],
-                           check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "300", onnx_url, "-o", str(onnx_dest)], check=True, capture_output=True)
+            subprocess.run(["curl", "-fL", "--max-time", "60",  json_url, "-o", str(json_dest)], check=True, capture_output=True)
             self.done.emit(True, stem)
         except subprocess.CalledProcessError:
-            onnx_dest.unlink(missing_ok=True)
-            json_dest.unlink(missing_ok=True)
+            onnx_dest.unlink(missing_ok=True); json_dest.unlink(missing_ok=True)
             self.done.emit(False, stem)
 
 class UpdateWorker(QThread):
@@ -254,8 +336,7 @@ class UpdateWorker(QThread):
         ok = True
         for src, dst in files:
             try:
-                subprocess.run(["curl", "-fL", f"{REPO_RAW}/{src}", "-o", str(bin_dir/dst)],
-                               check=True, capture_output=True)
+                subprocess.run(["curl", "-fL", f"{REPO_RAW}/{src}", "-o", str(bin_dir/dst)], check=True, capture_output=True)
                 (bin_dir/dst).chmod(0o755)
             except subprocess.CalledProcessError:
                 ok = False
@@ -270,7 +351,6 @@ class SpeakDialog(QDialog):
         self.setWindowTitle("TTS")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self._worker = None
-
         row = QHBoxLayout()
         row.addWidget(QLabel("Say:"))
         self.edit = QLineEdit()
@@ -282,7 +362,6 @@ class SpeakDialog(QDialog):
         btn = QPushButton("Say")
         btn.clicked.connect(self._say)
         row.addWidget(btn)
-
         self.setLayout(row)
         self.edit.returnPressed.connect(self._say)
         self.edit.setFocus()
@@ -305,11 +384,12 @@ def _hline():
 
 
 class DownloadDialog(QDialog):
-    # Maps character display name -> (WorkerClass, stem, test_phrase)
+    # (display, worker_class, stem, test_phrase, is_rvc)
     _CHARACTERS = [
-        ("GLaDOS",   GladosWorker,  "glados",  "Hello. You are doing very well."),
-        ("HAL-9000", Hal9000Worker, "hal9000", "I'm sorry, I can't do that."),
-        ("Trump",    TrumpWorker,   "trump",   "Believe me, this is the best voice."),
+        ("GLaDOS",       GladosWorker,  "glados",  "Hello. You are doing very well.", False),
+        ("HAL-9000",     Hal9000Worker, "hal9000", "I'm sorry, I can't do that.",     False),
+        ("Trump",        TrumpWorker,   "trump",   "Believe me, this is the best.",   False),
+        ("Kinger (RVC)", KingerWorker,  "kinger",  None,                              True),
     ]
 
     def __init__(self, parent=None):
@@ -321,7 +401,7 @@ class DownloadDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # ── Mode selector ──────────────────────────────────────────
+        # ── Mode ───────────────────────────────────────────────
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
@@ -329,13 +409,11 @@ class DownloadDialog(QDialog):
         mode_row.addWidget(self.mode_combo)
         mode_row.addStretch()
         layout.addLayout(mode_row)
-
         layout.addWidget(_hline())
 
-        # ── A) Official piper voices ─────────────────────────────────
+        # ── Official piper voices ─────────────────────────────────
         piper_box = QGroupBox("Official piper voices")
         piper_layout = QVBoxLayout(piper_box)
-
         lang_row = QHBoxLayout()
         lang_row.addWidget(QLabel("Language:"))
         self.lang_combo = QComboBox()
@@ -343,23 +421,19 @@ class DownloadDialog(QDialog):
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
         lang_row.addWidget(self.lang_combo)
         piper_layout.addLayout(lang_row)
-
         voice_row = QHBoxLayout()
         voice_row.addWidget(QLabel("Voice:"))
         self.voice_combo = QComboBox()
         voice_row.addWidget(self.voice_combo)
         piper_layout.addLayout(voice_row)
-
         piper_dl_btn = QPushButton("Download")
         piper_dl_btn.clicked.connect(self._download_piper)
         piper_layout.addWidget(piper_dl_btn)
-
         layout.addWidget(piper_box)
 
-        # ── B) Custom URL / model name ────────────────────────────
+        # ── Custom URL ───────────────────────────────────────
         custom_box = QGroupBox("Custom URL or model name")
         custom_layout = QVBoxLayout(custom_box)
-
         custom_row = QHBoxLayout()
         self.custom_edit = QLineEdit()
         self.custom_edit.setPlaceholderText("HuggingFace .onnx URL or model name (e.g. en_GB-alan-medium)")
@@ -368,14 +442,13 @@ class DownloadDialog(QDialog):
         custom_dl_btn.clicked.connect(self._download_custom)
         custom_row.addWidget(custom_dl_btn)
         custom_layout.addLayout(custom_row)
-
         layout.addWidget(custom_box)
 
-        # ── C) Characters ────────────────────────────────────────
+        # ── Characters ────────────────────────────────────────
         chars_box = QGroupBox("Characters")
         chars_row = QHBoxLayout(chars_box)
         self.char_combo = QComboBox()
-        for name, _cls, _stem, _phrase in self._CHARACTERS:
+        for name, _cls, _stem, _phrase, _is_rvc in self._CHARACTERS:
             self.char_combo.addItem(name)
         chars_row.addWidget(self.char_combo)
         char_dl_btn = QPushButton("Download")
@@ -386,7 +459,6 @@ class DownloadDialog(QDialog):
         # ── Status + Close ───────────────────────────────────────
         self.status_label = QLabel("Ready.")
         layout.addWidget(self.status_label)
-
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
@@ -473,8 +545,6 @@ class DownloadDialog(QDialog):
                 else:
                     self.status_label.setText(f"Downloaded {stem}.")
             w.done.connect(_on_done)
-            self._workers.append(w)
-            w.start()
         else:
             self.status_label.setText(f"Downloading {text}...")
             w = DownloadWorker(text)
@@ -486,21 +556,22 @@ class DownloadDialog(QDialog):
                 else:
                     self.status_label.setText(f"Downloaded {name}.")
             w.done.connect(_on_done)
-            self._workers.append(w)
-            w.start()
+        self._workers.append(w)
+        w.start()
 
     def _download_character(self):
         idx = self.char_combo.currentIndex()
-        name, cls, stem, phrase = self._CHARACTERS[idx]
+        name, cls, stem, phrase, is_rvc = self._CHARACTERS[idx]
         self.status_label.setText(f"Downloading {name}...")
         w = cls()
         def _on_done(ok, err):
             if not ok:
                 self.status_label.setText(f"{name} download FAILED: {err}")
-            elif self._is_test_mode():
+            elif not is_rvc and self._is_test_mode():
                 self._maybe_test_and_delete(stem, phrase)
             else:
-                self.status_label.setText(f"{name} downloaded.")
+                note = " - select it as active RVC in main window" if is_rvc else ""
+                self.status_label.setText(f"{name} downloaded.{note}")
         w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
@@ -525,6 +596,16 @@ class MainWindow(QMainWindow):
 
         self.active_label = QLabel("Active: none")
         layout.addWidget(self.active_label)
+
+        # RVC selector row
+        rvc_row = QHBoxLayout()
+        rvc_row.addWidget(QLabel("RVC:"))
+        self.rvc_combo = QComboBox()
+        self.rvc_combo.addItem("none", userData=None)
+        self.rvc_combo.currentIndexChanged.connect(self._on_rvc_changed)
+        rvc_row.addWidget(self.rvc_combo)
+        rvc_row.addStretch()
+        layout.addLayout(rvc_row)
 
         speak_row = QHBoxLayout()
         speak_row.addWidget(QLabel("Say:"))
@@ -566,16 +647,11 @@ class MainWindow(QMainWindow):
     def _setup_tray(self):
         self.tray = QSystemTrayIcon(QIcon.fromTheme("audio-headset"), self)
         menu = QMenu()
-        say_action = QAction("Say...", self)
-        say_action.triggered.connect(self._tray_speak)
-        open_action = QAction("Open", self)
-        open_action.triggered.connect(self._show_window)
-        reload_action = QAction("Reload models", self)
-        reload_action.triggered.connect(self.refresh)
-        restart_action = QAction("Restart", self)
-        restart_action.triggered.connect(self._restart)
-        quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(QApplication.quit)
+        say_action    = QAction("Say...",        self); say_action.triggered.connect(self._tray_speak)
+        open_action   = QAction("Open",          self); open_action.triggered.connect(self._show_window)
+        reload_action = QAction("Reload models", self); reload_action.triggered.connect(self.refresh)
+        restart_action= QAction("Restart",       self); restart_action.triggered.connect(self._restart)
+        quit_action   = QAction("Quit",          self); quit_action.triggered.connect(QApplication.quit)
         menu.addAction(say_action)
         menu.addAction(open_action)
         menu.addAction(reload_action)
@@ -591,17 +667,14 @@ class MainWindow(QMainWindow):
         self.hide()
 
     def _show_window(self):
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.show(); self.raise_(); self.activateWindow()
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._tray_speak()
 
     def _tray_speak(self):
-        d = SpeakDialog(self)
-        d.exec()
+        d = SpeakDialog(self); d.exec()
 
     def _restart(self):
         subprocess.Popen([sys.executable] + sys.argv)
@@ -609,9 +682,21 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         active = get_active()
-        rate = get_rate(active) if active else "?"
+        rate   = get_rate(active) if active else "?"
         self.active_label.setText(f"Active: {active}  ({rate} Hz)" if active else "Active: none")
-        models = get_models()
+
+        # Rebuild RVC combo without triggering _on_rvc_changed
+        self.rvc_combo.blockSignals(True)
+        current_rvc = get_active_rvc()
+        self.rvc_combo.clear()
+        self.rvc_combo.addItem("none", userData=None)
+        for name in get_rvc_models():
+            self.rvc_combo.addItem(name, userData=name)
+        idx = self.rvc_combo.findData(current_rvc)
+        self.rvc_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.rvc_combo.blockSignals(False)
+
+        models    = get_models()
         favorites = get_favorites()
         favs   = sorted(m for m in models if m in favorites)
         others = sorted(m for m in models if m not in favorites)
@@ -623,6 +708,39 @@ class MainWindow(QMainWindow):
             self.model_list.addItem(item)
             if m == active:
                 self.model_list.setCurrentItem(item)
+
+    def _on_rvc_changed(self, index):
+        name = self.rvc_combo.currentData()
+        if not name:
+            set_active_rvc(None)
+            self.status.setText("RVC disabled")
+            return
+        # Ensure base piper voice is installed
+        base = BASE_PIPER_FOR_RVC
+        if not (PIPER_DIR / f"{base}.onnx").exists():
+            self.status.setText(f"Downloading base voice for RVC ({base})...")
+            w = BaseVoiceEnsureWorker()
+            def _on_base_ready(ok):
+                if ok:
+                    if get_active() != base:
+                        switch_model(base)
+                    set_active_rvc(name)
+                    self.refresh()
+                    self.status.setText(f"RVC enabled: {name}")
+                else:
+                    self.status.setText("Failed to download base voice for RVC")
+                    self.rvc_combo.blockSignals(True)
+                    self.rvc_combo.setCurrentIndex(0)
+                    self.rvc_combo.blockSignals(False)
+            w.done.connect(_on_base_ready)
+            self._workers.append(w)
+            w.start()
+        else:
+            if get_active() != base:
+                switch_model(base)
+            set_active_rvc(name)
+            self.refresh()
+            self.status.setText(f"RVC enabled: {name}")
 
     def _selected(self):
         item = self.model_list.currentItem()
@@ -642,10 +760,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_favorite(self, model):
         favs = get_favorites()
-        if model in favs:
-            favs.discard(model)
-        else:
-            favs.add(model)
+        if model in favs: favs.discard(model)
+        else: favs.add(model)
         set_favorites(favs)
         self.refresh()
 
@@ -673,13 +789,12 @@ class MainWindow(QMainWindow):
         if not m:
             return
         text = self.speak_edit.text().strip() or m
-        old = get_active()
+        old  = get_active()
         switch_model(m)
         self.status.setText(f"testing {m}...")
         def _run():
             speak_text(text, to_mic=False)
-            if old:
-                switch_model(old)
+            if old: switch_model(old)
         w = QThread()
         w.run = _run
         w.finished.connect(lambda: (self.refresh(), self.status.setText("ready")))
@@ -714,13 +829,12 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     PIPER_DIR.mkdir(parents=True, exist_ok=True)
+    RVC_DIR.mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
     if len(sys.argv) > 1 and sys.argv[1] == "--speak":
-        d = SpeakDialog()
-        d.exec()
-        sys.exit(0)
+        d = SpeakDialog(); d.exec(); sys.exit(0)
 
     win = MainWindow()
     win.show()
