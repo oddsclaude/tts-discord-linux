@@ -63,8 +63,10 @@ def get_rvc_models():
     except:
         return []
 
-def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
-    """Returns (rvc_ok, error_str). On RVC failure falls back to raw piper audio."""
+def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate, status_cb=None):
+    """Returns (rvc_ok, error_str). On RVC failure falls back to raw piper audio.
+    status_cb: optional callable(str) for progress updates.
+    """
     tmp_in = tmp_out = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -72,6 +74,7 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             tmp_out = f.name
 
+        if status_cb: status_cb("generating audio...")
         result = subprocess.run(
             ["piper-tts", "--model", model_path, "--output_raw"],
             input=text.encode(), capture_output=True
@@ -85,6 +88,7 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
         rvc_err  = ""
 
         try:
+            if status_cb: status_cb("applying RVC...")
             with wave.open(tmp_in, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
@@ -99,8 +103,6 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
                 f"r.load_model({repr(pth)}{', index_path=' + repr(idx) if has_idx else ''})\n"
                 f"r.infer_file({repr(tmp_in)}, {repr(tmp_out)})\n"
             )
-            # Use dedicated Python 3.12 venv if present (rvc-python needs numpy<=1.25.3
-            # which can't build on Python 3.13+)
             py_exe = str(RVC_VENV_PYTHON) if RVC_VENV_PYTHON.exists() else "python3"
             proc = subprocess.run([py_exe, "-c", script], capture_output=True, timeout=120)
             if proc.returncode != 0:
@@ -111,7 +113,6 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
             rvc_ok = True
         except Exception as e:
             rvc_err = str(e)[:200]
-            # out_rate / out_pcm already set to piper fallback above
 
         if not out_pcm:
             return False, "piper produced no audio"
@@ -135,7 +136,7 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate):
         if tmp_in:  Path(tmp_in).unlink(missing_ok=True)
         if tmp_out: Path(tmp_out).unlink(missing_ok=True)
 
-def speak_text(text, to_mic=True):
+def speak_text(text, to_mic=True, status_cb=None):
     active     = get_active()
     active_rvc = get_active_rvc()
     if not active:
@@ -143,7 +144,7 @@ def speak_text(text, to_mic=True):
     model_path = str(PIPER_DIR / f"{active}.onnx")
     rate       = get_rate(active)
     if active_rvc:
-        return _speak_with_rvc(text, to_mic, active_rvc, model_path, rate)
+        return _speak_with_rvc(text, to_mic, active_rvc, model_path, rate, status_cb)
     piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if to_mic:
@@ -168,18 +169,24 @@ def switch_model(model):
 # ── worker threads ──────────────────────────────────────────────
 
 class SpeakWorker(QThread):
-    rvc_failed = pyqtSignal(str)  # emitted when RVC errors but piper fallback is used
+    status_update = pyqtSignal(str)  # progress and final status (replaces finished->"ready")
+    rvc_failed    = pyqtSignal(str)  # emitted with error when RVC fails
 
     def __init__(self, text, to_mic):
         super().__init__()
         self.text, self.to_mic = text, to_mic
 
     def run(self):
-        result = speak_text(self.text, self.to_mic)
+        result = speak_text(self.text, self.to_mic,
+                            status_cb=lambda s: self.status_update.emit(s))
         if isinstance(result, tuple):
             rvc_ok, rvc_err = result
             if not rvc_ok:
-                self.rvc_failed.emit(rvc_err or "rvc-python not installed or inference failed")
+                err = rvc_err or "rvc-python not installed or inference failed"
+                self.rvc_failed.emit(err)
+                self.status_update.emit(f"RVC failed - using base voice")
+                return
+        self.status_update.emit("ready")
 
 class DownloadWorker(QThread):
     done = pyqtSignal(bool, str)
@@ -783,8 +790,8 @@ class MainWindow(QMainWindow):
         self.speak_edit.clear()
         self.status.setText("speaking...")
         w = SpeakWorker(text, self.mic_check.isChecked())
-        w.finished.connect(lambda: self.status.setText("ready"))
-        w.rvc_failed.connect(lambda err: self.status.setText(f"RVC failed (piper used): {err[:80]}"))
+        w.status_update.connect(self.status.setText)
+        w.rvc_failed.connect(lambda err: self.status.setText(f"RVC failed: {err[:80]}"))
         self._workers.append(w)
         w.start()
 
