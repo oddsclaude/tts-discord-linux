@@ -98,6 +98,26 @@ class DownloadWorker(QThread):
             (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
             self.done.emit(False, m)
 
+class TestAndDeleteWorker(QThread):
+    done = pyqtSignal(str)
+
+    def __init__(self, stem, phrase):
+        super().__init__()
+        self.stem = stem
+        self.phrase = phrase
+
+    def run(self):
+        old_active = get_active()
+        try:
+            switch_model(self.stem)
+            speak_text(self.phrase, to_mic=False)
+        finally:
+            if old_active:
+                switch_model(old_active)
+            (PIPER_DIR / f"{self.stem}.onnx").unlink(missing_ok=True)
+            (PIPER_DIR / f"{self.stem}.onnx.json").unlink(missing_ok=True)
+        self.done.emit(f"Tested and deleted {self.stem}.")
+
 class GladosWorker(QThread):
     done = pyqtSignal(bool, str)
 
@@ -285,6 +305,13 @@ def _hline():
 
 
 class DownloadDialog(QDialog):
+    # Maps character display name -> (WorkerClass, stem, test_phrase)
+    _CHARACTERS = [
+        ("GLaDOS",   GladosWorker,  "glados",  "Hello. You are doing very well."),
+        ("HAL-9000", Hal9000Worker, "hal9000", "I'm sorry, I can't do that."),
+        ("Trump",    TrumpWorker,   "trump",   "Believe me, this is the best voice."),
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Download Voice Model")
@@ -293,6 +320,17 @@ class DownloadDialog(QDialog):
         self._voices_data = {}
 
         layout = QVBoxLayout(self)
+
+        # ── Mode selector ──────────────────────────────────────────
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Download", "Download & Test"])
+        mode_row.addWidget(self.mode_combo)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+
+        layout.addWidget(_hline())
 
         # ── A) Official piper voices ─────────────────────────────────
         piper_box = QGroupBox("Official piper voices")
@@ -335,20 +373,14 @@ class DownloadDialog(QDialog):
 
         # ── C) Characters ────────────────────────────────────────
         chars_box = QGroupBox("Characters")
-        chars_layout = QVBoxLayout(chars_box)
-
-        glados_btn = QPushButton("Download GLaDOS")
-        glados_btn.clicked.connect(self._download_glados)
-        chars_layout.addWidget(glados_btn)
-
-        hal_btn = QPushButton("Download HAL-9000")
-        hal_btn.clicked.connect(self._download_hal9000)
-        chars_layout.addWidget(hal_btn)
-
-        trump_btn = QPushButton("Download Trump")
-        trump_btn.clicked.connect(self._download_trump)
-        chars_layout.addWidget(trump_btn)
-
+        chars_row = QHBoxLayout(chars_box)
+        self.char_combo = QComboBox()
+        for name, _cls, _stem, _phrase in self._CHARACTERS:
+            self.char_combo.addItem(name)
+        chars_row.addWidget(self.char_combo)
+        char_dl_btn = QPushButton("Download")
+        char_dl_btn.clicked.connect(self._download_character)
+        chars_row.addWidget(char_dl_btn)
         layout.addWidget(chars_box)
 
         # ── Status + Close ───────────────────────────────────────
@@ -360,6 +392,16 @@ class DownloadDialog(QDialog):
         layout.addWidget(close_btn)
 
         self._load_voices()
+
+    def _is_test_mode(self):
+        return self.mode_combo.currentText() == "Download & Test"
+
+    def _maybe_test_and_delete(self, stem, phrase):
+        self.status_label.setText(f"Testing {stem}... (will delete)")
+        w = TestAndDeleteWorker(stem, phrase)
+        w.done.connect(self.status_label.setText)
+        self._workers.append(w)
+        w.start()
 
     def _load_voices(self):
         w = VoicesWorker()
@@ -404,9 +446,14 @@ class DownloadDialog(QDialog):
             return
         self.status_label.setText(f"Downloading {key}...")
         w = DownloadWorker(key)
-        w.done.connect(lambda ok, name: self.status_label.setText(
-            f"Downloaded {name}." if ok else f"FAILED to download {name}."
-        ))
+        def _on_done(ok, name):
+            if not ok:
+                self.status_label.setText(f"FAILED to download {name}.")
+            elif self._is_test_mode():
+                self._maybe_test_and_delete(name, name)
+            else:
+                self.status_label.setText(f"Downloaded {name}.")
+        w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
 
@@ -418,44 +465,43 @@ class DownloadDialog(QDialog):
         if text.startswith("http"):
             self.status_label.setText("Downloading from URL...")
             w = DirectUrlWorker(text)
-            w.done.connect(lambda ok, name: self.status_label.setText(
-                f"Downloaded {name}." if ok else f"FAILED to download {name}."
-            ))
+            def _on_done(ok, stem):
+                if not ok:
+                    self.status_label.setText(f"FAILED to download {stem}.")
+                elif self._is_test_mode():
+                    self._maybe_test_and_delete(stem, stem)
+                else:
+                    self.status_label.setText(f"Downloaded {stem}.")
+            w.done.connect(_on_done)
             self._workers.append(w)
             w.start()
         else:
             self.status_label.setText(f"Downloading {text}...")
             w = DownloadWorker(text)
-            w.done.connect(lambda ok, name: self.status_label.setText(
-                f"Downloaded {name}." if ok else f"FAILED to download {name}."
-            ))
+            def _on_done(ok, name):
+                if not ok:
+                    self.status_label.setText(f"FAILED to download {name}.")
+                elif self._is_test_mode():
+                    self._maybe_test_and_delete(name, name)
+                else:
+                    self.status_label.setText(f"Downloaded {name}.")
+            w.done.connect(_on_done)
             self._workers.append(w)
             w.start()
 
-    def _download_glados(self):
-        self.status_label.setText("Downloading GLaDOS model (~64MB)...")
-        w = GladosWorker()
-        w.done.connect(lambda ok, err: self.status_label.setText(
-            "GLaDOS downloaded successfully." if ok else f"GLaDOS download FAILED: {err}"
-        ))
-        self._workers.append(w)
-        w.start()
-
-    def _download_hal9000(self):
-        self.status_label.setText("Downloading HAL-9000 model (~64MB)...")
-        w = Hal9000Worker()
-        w.done.connect(lambda ok, err: self.status_label.setText(
-            "HAL-9000 downloaded successfully." if ok else f"HAL-9000 download FAILED: {err}"
-        ))
-        self._workers.append(w)
-        w.start()
-
-    def _download_trump(self):
-        self.status_label.setText("Downloading Trump model (~106MB archive)...")
-        w = TrumpWorker()
-        w.done.connect(lambda ok, err: self.status_label.setText(
-            "Trump downloaded successfully." if ok else f"Trump download FAILED: {err}"
-        ))
+    def _download_character(self):
+        idx = self.char_combo.currentIndex()
+        name, cls, stem, phrase = self._CHARACTERS[idx]
+        self.status_label.setText(f"Downloading {name}...")
+        w = cls()
+        def _on_done(ok, err):
+            if not ok:
+                self.status_label.setText(f"{name} download FAILED: {err}")
+            elif self._is_test_mode():
+                self._maybe_test_and_delete(stem, phrase)
+            else:
+                self.status_label.setText(f"{name} downloaded.")
+        w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
 
