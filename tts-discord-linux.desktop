@@ -2,7 +2,7 @@
 Type=Application
 Name=TTS Manager
 Comment=TTS virtual microphone manager for Discord
-Exec=tts-gui
+Exec=/home/odd/.local/bin/tts-gui
 Icon=audio-headset
 Terminal=false
 Categories=Utility;AudioVideo;
