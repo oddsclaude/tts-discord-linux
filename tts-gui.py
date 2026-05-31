@@ -64,9 +64,7 @@ def get_rvc_models():
         return []
 
 def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate, status_cb=None):
-    """Returns (rvc_ok, error_str). On RVC failure falls back to raw piper audio.
-    status_cb: optional callable(str) for progress updates.
-    """
+    """Returns (rvc_ok, error_str). On RVC failure falls back to raw piper audio."""
     tmp_in = tmp_out = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -81,7 +79,6 @@ def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate, status_cb=None):
         )
         raw_pcm = result.stdout
 
-        # Default: use raw piper PCM directly (fallback if RVC fails)
         out_rate = rate
         out_pcm  = raw_pcm
         rvc_ok   = False
@@ -169,8 +166,7 @@ def switch_model(model):
 # ── worker threads ──────────────────────────────────────────────
 
 class SpeakWorker(QThread):
-    status_update = pyqtSignal(str)  # progress and final status (replaces finished->"ready")
-    rvc_failed    = pyqtSignal(str)  # emitted with error when RVC fails
+    status_update = pyqtSignal(str)  # all status updates including final state
 
     def __init__(self, text, to_mic):
         super().__init__()
@@ -183,8 +179,7 @@ class SpeakWorker(QThread):
             rvc_ok, rvc_err = result
             if not rvc_ok:
                 err = rvc_err or "rvc-python not installed or inference failed"
-                self.rvc_failed.emit(err)
-                self.status_update.emit(f"RVC failed - using base voice")
+                self.status_update.emit(f"RVC failed: {err[:120]}")
                 return
         self.status_update.emit("ready")
 
@@ -424,7 +419,6 @@ def _hline():
 
 
 class DownloadDialog(QDialog):
-    # (display, worker_class, stem, test_phrase, is_rvc)
     _CHARACTERS = [
         ("GLaDOS",       GladosWorker,  "glados",  "Hello. You are doing very well.", False),
         ("HAL-9000",     Hal9000Worker, "hal9000", "I'm sorry, I can't do that.",     False),
@@ -791,7 +785,6 @@ class MainWindow(QMainWindow):
         self.status.setText("speaking...")
         w = SpeakWorker(text, self.mic_check.isChecked())
         w.status_update.connect(self.status.setText)
-        w.rvc_failed.connect(lambda err: self.status.setText(f"RVC failed: {err[:80]}"))
         self._workers.append(w)
         w.start()
 
