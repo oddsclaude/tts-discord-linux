@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, json, threading, tarfile, zipfile, tempfile, shutil
+import sys, subprocess, json, threading, tarfile, tempfile
 from pathlib import Path
 from urllib.request import urlopen, Request
 from PyQt6.QtWidgets import (
@@ -99,11 +99,9 @@ class DownloadWorker(QThread):
             self.done.emit(False, m)
 
 class GladosWorker(QThread):
-    # Signal: (success, error_message) - error_message is "" on success
     done = pyqtSignal(bool, str)
 
     ONNX_URL = "https://github.com/dnhkng/GLaDOS/releases/download/0.1/glados.onnx"
-    # glados.json lives in the repo under models/TTS/ (no release asset for the config)
     JSON_URL = "https://raw.githubusercontent.com/dnhkng/GlaDOS/main/models/TTS/glados.json"
 
     def run(self):
@@ -122,7 +120,6 @@ class GladosWorker(QThread):
             self.done.emit(False, err)
 
 class Hal9000Worker(QThread):
-    # Signal: (success, error_message)
     done = pyqtSignal(bool, str)
     ONNX_URL = "https://huggingface.co/campwill/HAL-9000-Piper-TTS/resolve/main/hal.onnx"
     JSON_URL = "https://huggingface.co/campwill/HAL-9000-Piper-TTS/resolve/main/hal.onnx.json"
@@ -144,8 +141,6 @@ class Hal9000Worker(QThread):
             self.done.emit(False, err)
 
 class TrumpWorker(QThread):
-    """Downloads Trump voice from BibEBobberson/Piper (tar.gz archive, extracts .onnx files)."""
-    # Signal: (success, error_message)
     done = pyqtSignal(bool, str)
     ARCHIVE_URL = "https://huggingface.co/BibEBobberson/Piper/resolve/main/Donald%20Trump.tar.gz"
     STEM = "trump"
@@ -181,68 +176,6 @@ class TrumpWorker(QThread):
             err = e.stderr.decode(errors="replace")[:200] if e.stderr else "curl failed"
             self.done.emit(False, err)
         except (tarfile.TarError, RuntimeError, OSError) as e:
-            onnx_dest.unlink(missing_ok=True)
-            json_dest.unlink(missing_ok=True)
-            self.done.emit(False, str(e)[:200])
-        finally:
-            if tmp_archive and tmp_archive.exists():
-                tmp_archive.unlink(missing_ok=True)
-
-class HomerWorker(QThread):
-    """Downloads Homer voice from BibEBobberson/Piper (zip archive).
-
-    The archive contains HomerSimpson-e20.ckpt (a model weights file with a .ckpt
-    extension) and no .onnx files.  We extract the largest model file regardless
-    of extension and save it as homer.onnx so piper can load it.
-    """
-    # Signal: (success, error_message)
-    done = pyqtSignal(bool, str)
-    ARCHIVE_URL = "https://huggingface.co/BibEBobberson/Piper/resolve/main/Homer.zip"
-    CONFIG_URL  = "https://huggingface.co/BibEBobberson/Piper/resolve/main/config.json"
-    STEM = "homer"
-
-    def run(self):
-        onnx_dest = PIPER_DIR / f"{self.STEM}.onnx"
-        json_dest = PIPER_DIR / f"{self.STEM}.onnx.json"
-        tmp_archive = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
-                tmp_archive = Path(tf.name)
-            subprocess.run(
-                ["curl", "-fL", "--max-time", "300", self.ARCHIVE_URL, "-o", str(tmp_archive)],
-                check=True, capture_output=True
-            )
-            with zipfile.ZipFile(tmp_archive, "r") as zf:
-                names = zf.namelist()
-                onnx_names = [n for n in names if n.endswith(".onnx") and not n.endswith(".onnx.json")]
-                json_names = [n for n in names if n.endswith(".onnx.json")]
-                if not onnx_names:
-                    model_names = [n for n in names
-                                   if not n.endswith("/")
-                                   and not n.lower().endswith(".wav")
-                                   and not n.lower().endswith(".json")
-                                   and any(n.endswith(ext) for ext in (".ckpt", ".pth", ".bin", ".model"))]
-                    if not model_names:
-                        raise RuntimeError("No model file found in archive")
-                    model_names.sort(key=lambda n: zf.getinfo(n).file_size, reverse=True)
-                    onnx_names = [model_names[0]]
-                with zf.open(onnx_names[0]) as src, open(onnx_dest, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                if json_names:
-                    with zf.open(json_names[0]) as src, open(json_dest, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-            if not json_dest.exists():
-                subprocess.run(
-                    ["curl", "-fL", "--max-time", "60", self.CONFIG_URL, "-o", str(json_dest)],
-                    check=True, capture_output=True
-                )
-            self.done.emit(True, "")
-        except subprocess.CalledProcessError as e:
-            onnx_dest.unlink(missing_ok=True)
-            json_dest.unlink(missing_ok=True)
-            err = e.stderr.decode(errors="replace")[:200] if e.stderr else "curl failed"
-            self.done.emit(False, err)
-        except (zipfile.BadZipFile, RuntimeError, OSError) as e:
             onnx_dest.unlink(missing_ok=True)
             json_dest.unlink(missing_ok=True)
             self.done.emit(False, str(e)[:200])
@@ -361,7 +294,7 @@ class DownloadDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # ── A) Official piper voices section ─────────────────────────────
+        # ── A) Official piper voices ─────────────────────────────────
         piper_box = QGroupBox("Official piper voices")
         piper_layout = QVBoxLayout(piper_box)
 
@@ -385,7 +318,7 @@ class DownloadDialog(QDialog):
 
         layout.addWidget(piper_box)
 
-        # ── B) Custom URL / model name section ─────────────────────────
+        # ── B) Custom URL / model name ────────────────────────────
         custom_box = QGroupBox("Custom URL or model name")
         custom_layout = QVBoxLayout(custom_box)
 
@@ -400,7 +333,7 @@ class DownloadDialog(QDialog):
 
         layout.addWidget(custom_box)
 
-        # ── C) Characters section ─────────────────────────────────────
+        # ── C) Characters ────────────────────────────────────────
         chars_box = QGroupBox("Characters")
         chars_layout = QVBoxLayout(chars_box)
 
@@ -416,13 +349,9 @@ class DownloadDialog(QDialog):
         trump_btn.clicked.connect(self._download_trump)
         chars_layout.addWidget(trump_btn)
 
-        homer_btn = QPushButton("Download Homer")
-        homer_btn.clicked.connect(self._download_homer)
-        chars_layout.addWidget(homer_btn)
-
         layout.addWidget(chars_box)
 
-        # ── Status + Close ──────────────────────────────────────────
+        # ── Status + Close ───────────────────────────────────────
         self.status_label = QLabel("Ready.")
         layout.addWidget(self.status_label)
 
@@ -526,15 +455,6 @@ class DownloadDialog(QDialog):
         w = TrumpWorker()
         w.done.connect(lambda ok, err: self.status_label.setText(
             "Trump downloaded successfully." if ok else f"Trump download FAILED: {err}"
-        ))
-        self._workers.append(w)
-        w.start()
-
-    def _download_homer(self):
-        self.status_label.setText("Downloading Homer model (~223MB archive)...")
-        w = HomerWorker()
-        w.done.connect(lambda ok, err: self.status_label.setText(
-            "Homer downloaded successfully." if ok else f"Homer download FAILED: {err}"
         ))
         self._workers.append(w)
         w.start()
