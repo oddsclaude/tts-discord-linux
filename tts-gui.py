@@ -16,7 +16,7 @@ FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
 
-# ── helpers ───────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────
 
 def get_active():
     try:
@@ -68,7 +68,7 @@ def switch_model(model):
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
 
-# ── worker threads ────────────────────────────────────────────────────
+# ── worker threads ──────────────────────────────────────────────
 
 class SpeakWorker(QThread):
     def __init__(self, text, to_mic):
@@ -89,35 +89,6 @@ class DownloadWorker(QThread):
         voice   = rest.rsplit("-", 1)[0]
         lang    = lang_region.split("_")[0]
         base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{lang_region}/{voice}/{quality}/{m}"
-        try:
-            subprocess.run(["curl", "-fL", "--max-time", "300", f"{base}.onnx",      "-o", str(PIPER_DIR / f"{m}.onnx")],  check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", "--max-time", "60",  f"{base}.onnx.json", "-o", str(PIPER_DIR / f"{m}.onnx.json")], check=True, capture_output=True)
-            self.done.emit(True, m)
-        except subprocess.CalledProcessError:
-            (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
-            (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
-            self.done.emit(False, m)
-
-class WideVideoDownloadWorker(QThread):
-    """Downloads a voice model from wide-video/piper-voices-v1.0.0."""
-    done = pyqtSignal(bool, str)
-    BASE = "https://huggingface.co/wide-video/piper-voices-v1.0.0/resolve/main"
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def run(self):
-        m = self.model
-        try:
-            lang_region, rest = m.split("-", 1)
-            quality = rest.rsplit("-", 1)[-1]
-            voice   = rest.rsplit("-", 1)[0]
-            lang    = lang_region.split("_")[0]
-        except ValueError:
-            self.done.emit(False, m)
-            return
-        base = f"{self.BASE}/{lang}/{lang_region}/{voice}/{quality}/{m}"
         try:
             subprocess.run(["curl", "-fL", "--max-time", "300", f"{base}.onnx",      "-o", str(PIPER_DIR / f"{m}.onnx")],  check=True, capture_output=True)
             subprocess.run(["curl", "-fL", "--max-time", "60",  f"{base}.onnx.json", "-o", str(PIPER_DIR / f"{m}.onnx.json")], check=True, capture_output=True)
@@ -190,7 +161,6 @@ class TrumpWorker(QThread):
                 ["curl", "-fL", "--max-time", "300", self.ARCHIVE_URL, "-o", str(tmp_archive)],
                 check=True, capture_output=True
             )
-            # Extract .onnx and .onnx.json from the archive
             with tarfile.open(tmp_archive, "r:gz") as tar:
                 members = tar.getmembers()
                 onnx_members = [m for m in members if m.name.endswith(".onnx") and not m.name.endswith(".onnx.json")]
@@ -228,7 +198,6 @@ class HomerWorker(QThread):
     # Signal: (success, error_message)
     done = pyqtSignal(bool, str)
     ARCHIVE_URL = "https://huggingface.co/BibEBobberson/Piper/resolve/main/Homer.zip"
-    # Shared piper config from the same repo (valid piper JSON structure)
     CONFIG_URL  = "https://huggingface.co/BibEBobberson/Piper/resolve/main/config.json"
     STEM = "homer"
 
@@ -243,16 +212,11 @@ class HomerWorker(QThread):
                 ["curl", "-fL", "--max-time", "300", self.ARCHIVE_URL, "-o", str(tmp_archive)],
                 check=True, capture_output=True
             )
-            # Extract the model file from the zip.
-            # The archive stores the model as HomerSimpson-e20.ckpt (no .onnx extension);
-            # extract the largest non-directory, non-wav entry and save it as homer.onnx.
             with zipfile.ZipFile(tmp_archive, "r") as zf:
                 names = zf.namelist()
-                # Prefer .onnx files; fall back to .ckpt/.pth if none present
                 onnx_names = [n for n in names if n.endswith(".onnx") and not n.endswith(".onnx.json")]
                 json_names = [n for n in names if n.endswith(".onnx.json")]
                 if not onnx_names:
-                    # Accept .ckpt / .pth as the model file
                     model_names = [n for n in names
                                    if not n.endswith("/")
                                    and not n.lower().endswith(".wav")
@@ -260,7 +224,6 @@ class HomerWorker(QThread):
                                    and any(n.endswith(ext) for ext in (".ckpt", ".pth", ".bin", ".model"))]
                     if not model_names:
                         raise RuntimeError("No model file found in archive")
-                    # Pick the largest one
                     model_names.sort(key=lambda n: zf.getinfo(n).file_size, reverse=True)
                     onnx_names = [model_names[0]]
                 with zf.open(onnx_names[0]) as src, open(onnx_dest, "wb") as dst:
@@ -268,7 +231,6 @@ class HomerWorker(QThread):
                 if json_names:
                     with zf.open(json_names[0]) as src, open(json_dest, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-            # If no JSON was in the archive, download the shared config
             if not json_dest.exists():
                 subprocess.run(
                     ["curl", "-fL", "--max-time", "60", self.CONFIG_URL, "-o", str(json_dest)],
@@ -302,20 +264,6 @@ class VoicesWorker(QThread):
         except Exception:
             self.done.emit({})
 
-class WideVideoVoicesWorker(QThread):
-    done = pyqtSignal(dict)
-
-    VOICES_URL = "https://huggingface.co/wide-video/piper-voices-v1.0.0/resolve/main/voices.json"
-
-    def run(self):
-        try:
-            req = Request(self.VOICES_URL, headers={"User-Agent": "tts-gui/1.0"})
-            with urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode())
-            self.done.emit(data)
-        except Exception:
-            self.done.emit({})
-
 class DirectUrlWorker(QThread):
     done = pyqtSignal(bool, str)
 
@@ -328,7 +276,6 @@ class DirectUrlWorker(QThread):
         url = self.url
         parsed = urlparse(url)
         basename = Path(parsed.path).name
-        # Strip .onnx extension to get the stem name
         stem = basename[:-5] if basename.endswith(".onnx") else basename
         onnx_url = url if url.endswith(".onnx") else url + ".onnx"
         json_url = onnx_url + ".json"
@@ -362,7 +309,7 @@ class UpdateWorker(QThread):
         self.done.emit(ok)
 
 
-# ── speak dialog ───────────────────────────────────────────
+# ── speak dialog ─────────────────────────────────────────────
 
 class SpeakDialog(QDialog):
     def __init__(self, parent=None):
@@ -395,7 +342,7 @@ class SpeakDialog(QDialog):
         self.accept()
 
 
-# ── download dialog ─────────────────────────────────────────────
+# ── download dialog ──────────────────────────────────────────
 
 def _hline():
     line = QFrame()
@@ -411,11 +358,10 @@ class DownloadDialog(QDialog):
         self.setMinimumWidth(520)
         self._workers = []
         self._voices_data = {}
-        self._wv_voices_data = {}
 
         layout = QVBoxLayout(self)
 
-        # ── A) Official piper voices section ─────────────────────────────────
+        # ── A) Official piper voices section ─────────────────────────────
         piper_box = QGroupBox("Official piper voices")
         piper_layout = QVBoxLayout(piper_box)
 
@@ -439,31 +385,7 @@ class DownloadDialog(QDialog):
 
         layout.addWidget(piper_box)
 
-        # ── B) wide-video piper voices section ──────────────────────────────
-        wv_box = QGroupBox("wide-video piper voices")
-        wv_layout = QVBoxLayout(wv_box)
-
-        wv_lang_row = QHBoxLayout()
-        wv_lang_row.addWidget(QLabel("Language:"))
-        self.wv_lang_combo = QComboBox()
-        self.wv_lang_combo.addItem("Loading...")
-        self.wv_lang_combo.currentIndexChanged.connect(self._on_wv_lang_changed)
-        wv_lang_row.addWidget(self.wv_lang_combo)
-        wv_layout.addLayout(wv_lang_row)
-
-        wv_voice_row = QHBoxLayout()
-        wv_voice_row.addWidget(QLabel("Voice:"))
-        self.wv_voice_combo = QComboBox()
-        wv_voice_row.addWidget(self.wv_voice_combo)
-        wv_layout.addLayout(wv_voice_row)
-
-        wv_dl_btn = QPushButton("Download")
-        wv_dl_btn.clicked.connect(self._download_wide_video)
-        wv_layout.addWidget(wv_dl_btn)
-
-        layout.addWidget(wv_box)
-
-        # ── C) Custom URL / model name section ──────────────────────────────
+        # ── B) Custom URL / model name section ─────────────────────────
         custom_box = QGroupBox("Custom URL or model name")
         custom_layout = QVBoxLayout(custom_box)
 
@@ -478,7 +400,7 @@ class DownloadDialog(QDialog):
 
         layout.addWidget(custom_box)
 
-        # ── D) Characters section ────────────────────────────────────────────
+        # ── C) Characters section ─────────────────────────────────────
         chars_box = QGroupBox("Characters")
         chars_layout = QVBoxLayout(chars_box)
 
@@ -500,7 +422,7 @@ class DownloadDialog(QDialog):
 
         layout.addWidget(chars_box)
 
-        # ── Status + Close ──────────────────────────────────────────────────
+        # ── Status + Close ──────────────────────────────────────────
         self.status_label = QLabel("Ready.")
         layout.addWidget(self.status_label)
 
@@ -508,11 +430,7 @@ class DownloadDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
-        # Start fetching voices lists in background
         self._load_voices()
-        self._load_wv_voices()
-
-    # ── official piper voices ────────────────────────────────────────────
 
     def _load_voices(self):
         w = VoicesWorker()
@@ -563,57 +481,6 @@ class DownloadDialog(QDialog):
         self._workers.append(w)
         w.start()
 
-    # ── wide-video piper voices ───────────────────────────────────────────
-
-    def _load_wv_voices(self):
-        w = WideVideoVoicesWorker()
-        w.done.connect(self._on_wv_voices_loaded)
-        self._workers.append(w)
-        w.start()
-
-    def _on_wv_voices_loaded(self, data):
-        self._wv_voices_data = data
-        self.wv_lang_combo.clear()
-        if not data:
-            self.wv_lang_combo.addItem("(failed to load)")
-            return
-        langs = sorted(set(k.split("-")[0] for k in data.keys()))
-        for lang in langs:
-            self.wv_lang_combo.addItem(lang)
-
-    def _on_wv_lang_changed(self, index):
-        self.wv_voice_combo.clear()
-        if not self._wv_voices_data:
-            return
-        lang = self.wv_lang_combo.currentText()
-        if not lang or lang in ("Loading...", "(failed to load)"):
-            return
-        entries = []
-        for key in self._wv_voices_data.keys():
-            parts = key.split("-")
-            if len(parts) >= 3 and parts[0] == lang:
-                name    = "-".join(parts[1:-1])
-                quality = parts[-1]
-                entries.append((f"{name} ({quality})", key))
-        entries.sort(key=lambda x: x[0])
-        for display, key in entries:
-            self.wv_voice_combo.addItem(display, userData=key)
-
-    def _download_wide_video(self):
-        key = self.wv_voice_combo.currentData()
-        if not key:
-            self.status_label.setText("No voice selected.")
-            return
-        self.status_label.setText(f"Downloading {key} (wide-video)...")
-        w = WideVideoDownloadWorker(key)
-        w.done.connect(lambda ok, name: self.status_label.setText(
-            f"Downloaded {name}." if ok else f"FAILED to download {name}."
-        ))
-        self._workers.append(w)
-        w.start()
-
-    # ── custom URL ────────────────────────────────────────────────────────
-
     def _download_custom(self):
         text = self.custom_edit.text().strip()
         if not text:
@@ -635,8 +502,6 @@ class DownloadDialog(QDialog):
             ))
             self._workers.append(w)
             w.start()
-
-    # ── characters ────────────────────────────────────────────────────────
 
     def _download_glados(self):
         self.status_label.setText("Downloading GLaDOS model (~64MB)...")
@@ -675,7 +540,7 @@ class DownloadDialog(QDialog):
         w.start()
 
 
-# ── main window ───────────────────────────────────────────
+# ── main window ──────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -841,7 +706,6 @@ class MainWindow(QMainWindow):
         m = self._selected()
         if not m:
             return
-        # Use speak box text if non-empty; otherwise fall back to model name
         text = self.speak_edit.text().strip() or m
         old = get_active()
         switch_model(m)
