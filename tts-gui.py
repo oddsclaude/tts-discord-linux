@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, json, threading
+import sys, subprocess, json, time
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -8,11 +8,15 @@ from PyQt6.QtWidgets import (
     QInputDialog
 )
 from PyQt6.QtGui import QIcon, QAction
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot
+from PyQt6.QtDBus import (QDBusConnection, QDBusInterface, QDBusMessage,
+                           QDBusVariant, QDBus, QDBusAbstractAdaptor)
 
-PIPER_DIR = Path.home() / ".local/share/piper"
+PIPER_DIR      = Path.home() / ".local/share/piper"
+FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
-
+DBUS_SERVICE = "net.local.ttsgui"
+DBUS_PATH    = "/ttsgui"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -24,6 +28,15 @@ def get_active():
 
 def get_models():
     return sorted(f.stem for f in PIPER_DIR.glob("*.onnx"))
+
+def get_favorites():
+    try:
+        return set(json.loads(FAVORITES_FILE.read_text()))
+    except:
+        return set()
+
+def set_favorites(favs):
+    FAVORITES_FILE.write_text(json.dumps(sorted(favs)))
 
 def get_rate(model):
     try:
@@ -57,7 +70,7 @@ def switch_model(model):
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
 
-# ── worker threads ────────────────────────────────────────────────────────────────
+# ── worker threads ────────────────────────────────────────────────────────────
 
 class SpeakWorker(QThread):
     def __init__(self, text, to_mic):
@@ -104,6 +117,21 @@ class UpdateWorker(QThread):
         self.done.emit(ok)
 
 
+# ── D-Bus adaptor (exposes ShowSpeakDialog to other processes) ─────────────────
+
+class TTSAdaptor(QDBusAbstractAdaptor):
+    Q_CLASSINFO = {"D-Bus Interface": DBUS_SERVICE}
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAutoRelaySignals(False)
+
+    @pyqtSlot()
+    def ShowSpeakDialog(self):
+        # parent is MainWindow
+        self.parent()._tray_speak()
+
+
 # ── speak dialog ──────────────────────────────────────────────────────────────
 
 class SpeakDialog(QDialog):
@@ -148,6 +176,9 @@ class MainWindow(QMainWindow):
         self._build()
         self._setup_tray()
         self.refresh()
+        self._start_pipewire()
+        self._register_dbus()
+        self._register_shortcut()
 
     def _build(self):
         w = QWidget()
@@ -174,15 +205,17 @@ class MainWindow(QMainWindow):
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(200)
         self.model_list.itemDoubleClicked.connect(self._switch)
+        self.model_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.model_list.customContextMenuRequested.connect(self._model_context_menu)
         layout.addWidget(self.model_list)
 
         btn_row = QHBoxLayout()
         for label, slot in [
-            ("Switch",   self._switch),
-            ("Test",     self._test),
+            ("Switch", self._switch),
+            ("Test",   self._test),
             ("Download", self._download),
-            ("Remove",   self._remove),
-            ("Update",   self._update),
+            ("Remove", self._remove),
+            ("Update", self._update),
         ]:
             b = QPushButton(label)
             b.clicked.connect(slot)
@@ -199,10 +232,13 @@ class MainWindow(QMainWindow):
         say_action.triggered.connect(self._tray_speak)
         open_action = QAction("Open", self)
         open_action.triggered.connect(self._show_window)
+        reload_action = QAction("Reload models", self)
+        reload_action.triggered.connect(self.refresh)
         quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(QApplication.quit)
+        quit_action.triggered.connect(self._quit_app)
         menu.addAction(say_action)
         menu.addAction(open_action)
+        menu.addAction(reload_action)
         menu.addSeparator()
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
@@ -224,23 +260,51 @@ class MainWindow(QMainWindow):
 
     def _tray_speak(self):
         d = SpeakDialog(self)
-        d.exec()
+        d.show()
+        d.activateWindow()
+        d.raise_()
 
     def refresh(self):
         active = get_active()
         rate = get_rate(active) if active else "?"
         self.active_label.setText(f"Active: {active}  ({rate} Hz)" if active else "Active: none")
         models = get_models()
+        favorites = get_favorites()
+        favs   = sorted(m for m in models if m in favorites)
+        others = sorted(m for m in models if m not in favorites)
         self.model_list.clear()
-        for m in models:
-            item = QListWidgetItem(("* " if m == active else "  ") + m)
+        for m in favs + others:
+            prefix = ("★ " if m in favorites else "  ") + ("* " if m == active else "  ")
+            item = QListWidgetItem(prefix + m)
+            item.setData(Qt.ItemDataRole.UserRole, m)
             self.model_list.addItem(item)
             if m == active:
                 self.model_list.setCurrentItem(item)
 
     def _selected(self):
         item = self.model_list.currentItem()
-        return item.text().strip().lstrip("* ") if item else None
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _model_context_menu(self, pos):
+        m = self._selected()
+        if not m:
+            return
+        favs = get_favorites()
+        menu = QMenu(self)
+        label = "Remove from favorites" if m in favs else "Add to favorites"
+        action = QAction(label, self)
+        action.triggered.connect(lambda: self._toggle_favorite(m))
+        menu.addAction(action)
+        menu.exec(self.model_list.mapToGlobal(pos))
+
+    def _toggle_favorite(self, model):
+        favs = get_favorites()
+        if model in favs:
+            favs.discard(model)
+        else:
+            favs.add(model)
+        set_favorites(favs)
+        self.refresh()
 
     def _speak(self):
         text = self.speak_edit.text().strip()
@@ -312,6 +376,112 @@ class MainWindow(QMainWindow):
         self._workers.append(w)
         w.start()
 
+    def _start_pipewire(self):
+        mic_init = Path.home() / ".local/bin/tts-mic-init"
+        if mic_init.exists():
+            subprocess.Popen([str(mic_init)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _stop_pipewire(self):
+        try:
+            result = subprocess.run(["pactl", "list", "short", "modules"],
+                                    capture_output=True, text=True)
+            for line in result.stdout.splitlines():
+                if "tts_sink" in line or "tts_mic" in line:
+                    mod_id = line.split()[0]
+                    subprocess.run(["pactl", "unload-module", mod_id],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    def _register_dbus(self):
+        bus = QDBusConnection.sessionBus()
+        self._dbus_adaptor = TTSAdaptor(self)
+        ok_svc = bus.registerService(DBUS_SERVICE)
+        ok_obj = bus.registerObject(DBUS_PATH, self,
+                                    QDBusConnection.RegisterOption.ExportAdaptors)
+        if not (ok_svc and ok_obj):
+            # Another instance is running - ask it to show the dialog instead
+            iface = QDBusInterface(DBUS_SERVICE, DBUS_PATH, DBUS_SERVICE, bus)
+            if iface.isValid():
+                iface.call("ShowSpeakDialog")
+            sys.exit(0)
+
+    def _register_shortcut(self):
+        # Write permanent command shortcut to kglobalshortcutsrc
+        desktop = Path.home() / ".local/share/applications/net.local.tts-speak.desktop"
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        desktop.write_text(
+            "[Desktop Entry]\n"
+            f"Exec={Path.home()}/.local/bin/tts-gui --speak\n"
+            "Name=TTS Speak\n"
+            "NoDisplay=true\n"
+            "StartupNotify=false\n"
+            "Type=Application\n"
+            "X-KDE-GlobalAccel-CommandShortcut=true\n"
+        )
+        cfg = Path.home() / ".config/kglobalshortcutsrc"
+        try:
+            lines = cfg.read_text().splitlines() if cfg.exists() else []
+            section = "[services][net.local.tts-speak.desktop]"
+            new_lines, in_section = [], False
+            for line in lines:
+                if line.strip() == section:
+                    in_section = True
+                    continue
+                if in_section and line.startswith("["):
+                    in_section = False
+                if not in_section:
+                    new_lines.append(line)
+            new_lines += [section, "_k_friendly_name=TTS Speak",
+                          "tts-speak=Ctrl+Print,none,TTS Speak", ""]
+            cfg.write_text("\n".join(new_lines) + "\n")
+        except Exception:
+            pass
+        # Restart kglobalacceld to pick up the new shortcut
+        qdbus = "qdbus6" if subprocess.run(["which", "qdbus6"], capture_output=True).returncode == 0 else "qdbus"
+        subprocess.Popen([qdbus, "org.kde.kglobalaccel", "/kglobalaccel",
+                          "org.kde.KGlobalAccel.unregister",
+                          "net.local.tts-speak.desktop", "tts-speak"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["gdbus", "call", "--session",
+                        "--dest", "org.kde.kglobalaccel",
+                        "--object-path", "/kglobalaccel",
+                        "--method", "org.kde.KGlobalAccel.doRegister",
+                        '["net.local.tts-speak.desktop","tts-speak","TTS Speak","TTS Speak"]'],
+                       capture_output=True, timeout=3)
+        subprocess.run(["gdbus", "call", "--session",
+                        "--dest", "org.kde.kglobalaccel",
+                        "--object-path", "/kglobalaccel",
+                        "--method", "org.kde.KGlobalAccel.setForeignShortcut",
+                        '["net.local.tts-speak.desktop","tts-speak","TTS Speak","TTS Speak"]',
+                        "[83886089]"],
+                       capture_output=True, timeout=3)
+
+    def _unregister_shortcut(self):
+        qdbus = "qdbus6" if subprocess.run(["which", "qdbus6"], capture_output=True).returncode == 0 else "qdbus"
+        subprocess.Popen([qdbus, "org.kde.kglobalaccel", "/kglobalaccel",
+                          "org.kde.KGlobalAccel.unregister",
+                          "net.local.tts-speak.desktop", "tts-speak"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _quit_app(self):
+        self._unregister_shortcut()
+        self._stop_pipewire()
+        bus = QDBusConnection.sessionBus()
+        bus.unregisterService(DBUS_SERVICE)
+        QApplication.quit()
+
+
+# ── --speak mode: IPC to running instance ────────────────────────────────────
+
+def _speak_mode():
+    bus = QDBusConnection.sessionBus()
+    iface = QDBusInterface(DBUS_SERVICE, DBUS_PATH, DBUS_SERVICE, bus)
+    if iface.isValid():
+        iface.call("ShowSpeakDialog")
+    # silently exit if tts-gui is not running (shortcut does nothing)
+    sys.exit(0)
+
 
 if __name__ == "__main__":
     PIPER_DIR.mkdir(parents=True, exist_ok=True)
@@ -319,9 +489,7 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(False)
 
     if len(sys.argv) > 1 and sys.argv[1] == "--speak":
-        d = SpeakDialog()
-        d.exec()
-        sys.exit(0)
+        _speak_mode()
 
     win = MainWindow()
     win.show()
