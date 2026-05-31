@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, json, threading, tarfile, tempfile, wave
+import sys, subprocess, json, threading, tarfile, tempfile
 from pathlib import Path
 from urllib.request import urlopen, Request
 from PyQt6.QtWidgets import (
@@ -12,11 +12,8 @@ from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 PIPER_DIR      = Path.home() / ".local/share/piper"
-RVC_DIR        = PIPER_DIR / "rvc"
 FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
-BASE_PIPER_FOR_RVC = "en_GB-northern_english_male-medium"
-RVC_VENV_PYTHON = PIPER_DIR / "rvc-env" / "bin" / "python3"
 
 
 # ── helpers ───────────────────────────────────────────────
@@ -45,103 +42,12 @@ def get_rate(model):
     except:
         return 22050
 
-def get_active_rvc():
-    try:
-        v = (RVC_DIR / "active_rvc").read_text().strip()
-        return v if v else None
-    except:
-        return None
-
-def set_active_rvc(name):
-    RVC_DIR.mkdir(parents=True, exist_ok=True)
-    (RVC_DIR / "active_rvc").write_text(name or "")
-
-def get_rvc_models():
-    try:
-        return sorted(d.name for d in RVC_DIR.iterdir()
-                      if d.is_dir() and (d / f"{d.name}.pth").exists())
-    except:
-        return []
-
-def _speak_with_rvc(text, to_mic, rvc_name, model_path, rate, status_cb=None):
-    """Returns (rvc_ok, error_str). On RVC failure falls back to raw piper audio."""
-    tmp_in = tmp_out = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            tmp_in = f.name
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            tmp_out = f.name
-
-        if status_cb: status_cb("generating audio...")
-        result = subprocess.run(
-            ["piper-tts", "--model", model_path, "--output_raw"],
-            input=text.encode(), capture_output=True
-        )
-        raw_pcm = result.stdout
-
-        out_rate = rate
-        out_pcm  = raw_pcm
-        rvc_ok   = False
-        rvc_err  = ""
-
-        try:
-            if status_cb: status_cb("applying RVC...")
-            with wave.open(tmp_in, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(rate)
-                wf.writeframes(raw_pcm)
-            pth = str(RVC_DIR / rvc_name / f"{rvc_name}.pth")
-            idx = str(RVC_DIR / rvc_name / f"{rvc_name}.index")
-            has_idx = Path(idx).exists()
-            script = (
-                "from rvc_python.infer import RVCInference\n"
-                f"r = RVCInference(device='cpu')\n"
-                f"r.load_model({repr(pth)}{', index_path=' + repr(idx) if has_idx else ''})\n"
-                f"r.infer_file({repr(tmp_in)}, {repr(tmp_out)})\n"
-            )
-            py_exe = str(RVC_VENV_PYTHON) if RVC_VENV_PYTHON.exists() else "python3"
-            proc = subprocess.run([py_exe, "-c", script], capture_output=True, timeout=120)
-            if proc.returncode != 0:
-                raise RuntimeError(proc.stderr.decode(errors="replace")[:200])
-            with wave.open(tmp_out, "rb") as wf:
-                out_rate = wf.getframerate()
-                out_pcm  = wf.readframes(wf.getnframes())
-            rvc_ok = True
-        except Exception as e:
-            rvc_err = str(e)[:200]
-
-        if not out_pcm:
-            return False, "piper produced no audio"
-
-        if to_mic:
-            sink = subprocess.Popen(["bash", "-c",
-                f"tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate={out_rate} --channels=1)"
-                f" | pacat --volume=65536 --format=s16le --rate={out_rate} --channels=1"],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            sink = subprocess.Popen(
-                ["pacat", "--volume=65536", "--format=s16le", f"--rate={out_rate}", "--channels=1"],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        sink.stdin.write(out_pcm)
-        sink.stdin.close()
-        sink.wait()
-        return rvc_ok, rvc_err
-    except Exception as e:
-        return False, str(e)[:200]
-    finally:
-        if tmp_in:  Path(tmp_in).unlink(missing_ok=True)
-        if tmp_out: Path(tmp_out).unlink(missing_ok=True)
-
-def speak_text(text, to_mic=True, status_cb=None):
-    active     = get_active()
-    active_rvc = get_active_rvc()
+def speak_text(text, to_mic=True):
+    active = get_active()
     if not active:
-        return None
+        return
     model_path = str(PIPER_DIR / f"{active}.onnx")
     rate       = get_rate(active)
-    if active_rvc:
-        return _speak_with_rvc(text, to_mic, active_rvc, model_path, rate, status_cb)
     piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if to_mic:
@@ -156,7 +62,6 @@ def speak_text(text, to_mic=True, status_cb=None):
     piper.stdin.write(text.encode())
     piper.stdin.close()
     sink.wait()
-    return None
 
 def switch_model(model):
     (PIPER_DIR / "active_model").write_text(str(PIPER_DIR / f"{model}.onnx"))
@@ -166,22 +71,11 @@ def switch_model(model):
 # ── worker threads ──────────────────────────────────────────────
 
 class SpeakWorker(QThread):
-    status_update = pyqtSignal(str)  # all status updates including final state
-
     def __init__(self, text, to_mic):
         super().__init__()
         self.text, self.to_mic = text, to_mic
-
     def run(self):
-        result = speak_text(self.text, self.to_mic,
-                            status_cb=lambda s: self.status_update.emit(s))
-        if isinstance(result, tuple):
-            rvc_ok, rvc_err = result
-            if not rvc_ok:
-                err = rvc_err or "rvc-python not installed or inference failed"
-                self.status_update.emit(f"RVC failed: {err[:120]}")
-                return
-        self.status_update.emit("ready")
+        speak_text(self.text, self.to_mic)
 
 class DownloadWorker(QThread):
     done = pyqtSignal(bool, str)
@@ -203,27 +97,6 @@ class DownloadWorker(QThread):
             (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
             (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
             self.done.emit(False, m)
-
-class BaseVoiceEnsureWorker(QThread):
-    done = pyqtSignal(bool)
-    def run(self):
-        m = BASE_PIPER_FOR_RVC
-        if (PIPER_DIR / f"{m}.onnx").exists():
-            self.done.emit(True)
-            return
-        lang_region, rest = m.split("-", 1)
-        quality = rest.rsplit("-", 1)[-1]
-        voice   = rest.rsplit("-", 1)[0]
-        lang    = lang_region.split("_")[0]
-        base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{lang_region}/{voice}/{quality}/{m}"
-        try:
-            subprocess.run(["curl", "-fL", "--max-time", "300", f"{base}.onnx",      "-o", str(PIPER_DIR / f"{m}.onnx")],  check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", "--max-time", "60",  f"{base}.onnx.json", "-o", str(PIPER_DIR / f"{m}.onnx.json")], check=True, capture_output=True)
-            self.done.emit(True)
-        except subprocess.CalledProcessError:
-            (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
-            (PIPER_DIR / f"{m}.onnx.json").unlink(missing_ok=True)
-            self.done.emit(False)
 
 class TestAndDeleteWorker(QThread):
     done = pyqtSignal(str)
@@ -309,24 +182,6 @@ class TrumpWorker(QThread):
         finally:
             if tmp_archive and tmp_archive.exists():
                 tmp_archive.unlink(missing_ok=True)
-
-class KingerWorker(QThread):
-    done = pyqtSignal(bool, str)
-    PTH_URL   = "https://huggingface.co/binant/kinger/resolve/main/model.pth"
-    INDEX_URL = "https://huggingface.co/binant/kinger/resolve/main/model.index"
-    NAME = "kinger"
-    def run(self):
-        dest_dir = RVC_DIR / self.NAME
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        pth_dest   = dest_dir / f"{self.NAME}.pth"
-        index_dest = dest_dir / f"{self.NAME}.index"
-        try:
-            subprocess.run(["curl", "-fL", "--max-time", "300", self.PTH_URL,   "-o", str(pth_dest)],   check=True, capture_output=True)
-            subprocess.run(["curl", "-fL", "--max-time", "300", self.INDEX_URL, "-o", str(index_dest)], check=True, capture_output=True)
-            self.done.emit(True, "")
-        except subprocess.CalledProcessError as e:
-            pth_dest.unlink(missing_ok=True); index_dest.unlink(missing_ok=True)
-            self.done.emit(False, e.stderr.decode(errors="replace")[:200] if e.stderr else "curl failed")
 
 class VoicesWorker(QThread):
     done = pyqtSignal(dict)
@@ -420,10 +275,9 @@ def _hline():
 
 class DownloadDialog(QDialog):
     _CHARACTERS = [
-        ("GLaDOS",       GladosWorker,  "glados",  "Hello. You are doing very well.", False),
-        ("HAL-9000",     Hal9000Worker, "hal9000", "I'm sorry, I can't do that.",     False),
-        ("Trump",        TrumpWorker,   "trump",   "Believe me, this is the best.",   False),
-        ("Kinger (RVC)", KingerWorker,  "kinger",  None,                              True),
+        ("GLaDOS",   GladosWorker,  "glados",  "Hello. You are doing very well.", False),
+        ("HAL-9000", Hal9000Worker, "hal9000", "I'm sorry, I can't do that.",     False),
+        ("Trump",    TrumpWorker,   "trump",   "Believe me, this is the best.",   False),
     ]
 
     def __init__(self, parent=None):
@@ -587,11 +441,10 @@ class DownloadDialog(QDialog):
         def _on_done(ok, err):
             if not ok:
                 self.status_label.setText(f"{name} download FAILED: {err}")
-            elif not is_rvc and self._is_test_mode():
+            elif self._is_test_mode():
                 self._maybe_test_and_delete(stem, phrase)
             else:
-                note = " - select it as active RVC in main window" if is_rvc else ""
-                self.status_label.setText(f"{name} downloaded.{note}")
+                self.status_label.setText(f"{name} downloaded.")
         w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
@@ -616,15 +469,6 @@ class MainWindow(QMainWindow):
 
         self.active_label = QLabel("Active: none")
         layout.addWidget(self.active_label)
-
-        rvc_row = QHBoxLayout()
-        rvc_row.addWidget(QLabel("RVC:"))
-        self.rvc_combo = QComboBox()
-        self.rvc_combo.addItem("none", userData=None)
-        self.rvc_combo.currentIndexChanged.connect(self._on_rvc_changed)
-        rvc_row.addWidget(self.rvc_combo)
-        rvc_row.addStretch()
-        layout.addLayout(rvc_row)
 
         speak_row = QHBoxLayout()
         speak_row.addWidget(QLabel("Say:"))
@@ -699,16 +543,6 @@ class MainWindow(QMainWindow):
         rate   = get_rate(active) if active else "?"
         self.active_label.setText(f"Active: {active}  ({rate} Hz)" if active else "Active: none")
 
-        self.rvc_combo.blockSignals(True)
-        current_rvc = get_active_rvc()
-        self.rvc_combo.clear()
-        self.rvc_combo.addItem("none", userData=None)
-        for name in get_rvc_models():
-            self.rvc_combo.addItem(name, userData=name)
-        idx = self.rvc_combo.findData(current_rvc)
-        self.rvc_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.rvc_combo.blockSignals(False)
-
         models    = get_models()
         favorites = get_favorites()
         favs   = sorted(m for m in models if m in favorites)
@@ -721,38 +555,6 @@ class MainWindow(QMainWindow):
             self.model_list.addItem(item)
             if m == active:
                 self.model_list.setCurrentItem(item)
-
-    def _on_rvc_changed(self, index):
-        name = self.rvc_combo.currentData()
-        if not name:
-            set_active_rvc(None)
-            self.status.setText("RVC disabled")
-            return
-        base = BASE_PIPER_FOR_RVC
-        if not (PIPER_DIR / f"{base}.onnx").exists():
-            self.status.setText(f"Downloading base voice for RVC ({base})...")
-            w = BaseVoiceEnsureWorker()
-            def _on_base_ready(ok):
-                if ok:
-                    if get_active() != base:
-                        switch_model(base)
-                    set_active_rvc(name)
-                    self.refresh()
-                    self.status.setText(f"RVC enabled: {name}")
-                else:
-                    self.status.setText("Failed to download base voice for RVC")
-                    self.rvc_combo.blockSignals(True)
-                    self.rvc_combo.setCurrentIndex(0)
-                    self.rvc_combo.blockSignals(False)
-            w.done.connect(_on_base_ready)
-            self._workers.append(w)
-            w.start()
-        else:
-            if get_active() != base:
-                switch_model(base)
-            set_active_rvc(name)
-            self.refresh()
-            self.status.setText(f"RVC enabled: {name}")
 
     def _selected(self):
         item = self.model_list.currentItem()
@@ -784,7 +586,7 @@ class MainWindow(QMainWindow):
         self.speak_edit.clear()
         self.status.setText("speaking...")
         w = SpeakWorker(text, self.mic_check.isChecked())
-        w.status_update.connect(self.status.setText)
+        w.finished.connect(lambda: self.status.setText("ready"))
         self._workers.append(w)
         w.start()
 
@@ -841,7 +643,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     PIPER_DIR.mkdir(parents=True, exist_ok=True)
-    RVC_DIR.mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
