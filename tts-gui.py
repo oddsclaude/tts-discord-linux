@@ -213,11 +213,14 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._show_window)
         reload_action = QAction("Reload models", self)
         reload_action.triggered.connect(self.refresh)
+        restart_action = QAction("Restart", self)
+        restart_action.triggered.connect(self._restart)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.quit)
         menu.addAction(say_action)
         menu.addAction(open_action)
         menu.addAction(reload_action)
+        menu.addAction(restart_action)
         menu.addSeparator()
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
@@ -240,6 +243,10 @@ class MainWindow(QMainWindow):
     def _tray_speak(self):
         d = SpeakDialog(self)
         d.exec()
+
+    def _restart(self):
+        subprocess.Popen([sys.executable] + sys.argv)
+        QApplication.quit()
 
     def refresh(self):
         active = get_active()
