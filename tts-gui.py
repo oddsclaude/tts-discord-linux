@@ -246,25 +246,32 @@ class SpeakDialog(QDialog):
         self.setWindowTitle("TTS")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self._worker = None
+
+        layout = QVBoxLayout()
+
+        active = get_active()
+        model_label = QLabel(active if active else "no model active")
+        model_label.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(model_label)
+
         row = QHBoxLayout()
         row.addWidget(QLabel("Say:"))
         self.edit = QLineEdit()
         self.edit.setMinimumWidth(300)
         row.addWidget(self.edit)
-        self.mic = QCheckBox("mic")
-        self.mic.setChecked(True)
-        row.addWidget(self.mic)
         btn = QPushButton("Say")
         btn.clicked.connect(self._say)
         row.addWidget(btn)
-        self.setLayout(row)
+        layout.addLayout(row)
+
+        self.setLayout(layout)
         self.edit.returnPressed.connect(self._say)
         self.edit.setFocus()
 
     def _say(self):
         text = self.edit.text().strip()
         if text:
-            self._worker = SpeakWorker(text, self.mic.isChecked())
+            self._worker = SpeakWorker(text, True)
             self._worker.start()
         self.accept()
 
