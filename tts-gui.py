@@ -663,7 +663,12 @@ class MainWindow(QMainWindow):
     def _update(self):
         self.status.setText("updating...")
         w = UpdateWorker()
-        w.done.connect(lambda ok: self.status.setText("updated" if ok else "update failed"))
+        def _on_done(ok):
+            if ok:
+                self._restart()
+            else:
+                self.status.setText("update failed")
+        w.done.connect(_on_done)
         self._workers.append(w)
         w.start()
 
