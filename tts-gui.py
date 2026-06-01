@@ -16,7 +16,7 @@ FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
 
 
-# ── helpers ───────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────
 
 def get_active():
     try:
@@ -41,6 +41,9 @@ def get_rate(model):
         return json.loads((PIPER_DIR / f"{model}.onnx.json").read_text())["audio"]["sample_rate"]
     except:
         return 22050
+
+def model_exists(stem):
+    return (PIPER_DIR / f"{stem}.onnx").exists() and (PIPER_DIR / f"{stem}.onnx.json").exists()
 
 def speak_text(text, to_mic=True):
     active = get_active()
@@ -68,7 +71,7 @@ def switch_model(model):
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
 
-# ── worker threads ──────────────────────────────────────────────
+# ── worker threads ──────────────────────────────────────────────────────
 
 class SpeakWorker(QThread):
     def __init__(self, text, to_mic):
@@ -100,10 +103,11 @@ class DownloadWorker(QThread):
 
 class TestAndDeleteWorker(QThread):
     done = pyqtSignal(str)
-    def __init__(self, stem, phrase):
+    def __init__(self, stem, phrase, keep=False):
         super().__init__()
         self.stem = stem
         self.phrase = phrase
+        self.keep = keep
     def run(self):
         old_active = get_active()
         try:
@@ -112,9 +116,10 @@ class TestAndDeleteWorker(QThread):
         finally:
             if old_active:
                 switch_model(old_active)
-            (PIPER_DIR / f"{self.stem}.onnx").unlink(missing_ok=True)
-            (PIPER_DIR / f"{self.stem}.onnx.json").unlink(missing_ok=True)
-        self.done.emit(f"Tested and deleted {self.stem}.")
+            if not self.keep:
+                (PIPER_DIR / f"{self.stem}.onnx").unlink(missing_ok=True)
+                (PIPER_DIR / f"{self.stem}.onnx.json").unlink(missing_ok=True)
+        self.done.emit(f"Tested {self.stem}." if self.keep else f"Tested and deleted {self.stem}.")
 
 class GladosWorker(QThread):
     done = pyqtSignal(bool, str)
@@ -233,7 +238,7 @@ class UpdateWorker(QThread):
         self.done.emit(ok)
 
 
-# ── speak dialog ─────────────────────────────────────────────
+# ── speak dialog ──────────────────────────────────────────────────
 
 class SpeakDialog(QDialog):
     def __init__(self, parent=None):
@@ -264,7 +269,7 @@ class SpeakDialog(QDialog):
         self.accept()
 
 
-# ── download dialog ──────────────────────────────────────────
+# ── download dialog ──────────────────────────────────────────────
 
 def _hline():
     line = QFrame()
@@ -353,7 +358,14 @@ class DownloadDialog(QDialog):
 
     def _maybe_test_and_delete(self, stem, phrase):
         self.status_label.setText(f"Testing {stem}... (will delete)")
-        w = TestAndDeleteWorker(stem, phrase)
+        w = TestAndDeleteWorker(stem, phrase, keep=False)
+        w.done.connect(self.status_label.setText)
+        self._workers.append(w)
+        w.start()
+
+    def _test_only(self, stem, phrase):
+        self.status_label.setText(f"Testing {stem}...")
+        w = TestAndDeleteWorker(stem, phrase, keep=True)
         w.done.connect(self.status_label.setText)
         self._workers.append(w)
         w.start()
@@ -399,6 +411,9 @@ class DownloadDialog(QDialog):
         if not key:
             self.status_label.setText("No voice selected.")
             return
+        if self._is_test_mode() and model_exists(key):
+            self._test_only(key, key)
+            return
         self.status_label.setText(f"Downloading {key}...")
         w = DownloadWorker(key)
         def _on_done(ok, name):
@@ -415,14 +430,23 @@ class DownloadDialog(QDialog):
             self.status_label.setText("Please enter a URL or model name.")
             return
         if text.startswith("http"):
+            from urllib.parse import urlparse
+            basename = Path(urlparse(text).path).name
+            stem = basename[:-5] if basename.endswith(".onnx") else basename
+            if self._is_test_mode() and model_exists(stem):
+                self._test_only(stem, stem)
+                return
             self.status_label.setText("Downloading from URL...")
             w = DirectUrlWorker(text)
-            def _on_done(ok, stem):
-                if not ok: self.status_label.setText(f"FAILED to download {stem}.")
-                elif self._is_test_mode(): self._maybe_test_and_delete(stem, stem)
-                else: self.status_label.setText(f"Downloaded {stem}.")
+            def _on_done(ok, s):
+                if not ok: self.status_label.setText(f"FAILED to download {s}.")
+                elif self._is_test_mode(): self._maybe_test_and_delete(s, s)
+                else: self.status_label.setText(f"Downloaded {s}.")
             w.done.connect(_on_done)
         else:
+            if self._is_test_mode() and model_exists(text):
+                self._test_only(text, text)
+                return
             self.status_label.setText(f"Downloading {text}...")
             w = DownloadWorker(text)
             def _on_done(ok, name):
@@ -436,6 +460,9 @@ class DownloadDialog(QDialog):
     def _download_character(self):
         idx = self.char_combo.currentIndex()
         name, cls, stem, phrase, is_rvc = self._CHARACTERS[idx]
+        if self._is_test_mode() and model_exists(stem):
+            self._test_only(stem, phrase)
+            return
         self.status_label.setText(f"Downloading {name}...")
         w = cls()
         def _on_done(ok, err):
@@ -450,7 +477,7 @@ class DownloadDialog(QDialog):
         w.start()
 
 
-# ── main window ──────────────────────────────────────────────
+# ── main window ──────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self):
