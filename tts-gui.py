@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, subprocess, json, threading, tarfile, tempfile
+import sys, subprocess, json, threading, tarfile, tempfile, shutil
 from pathlib import Path
 from urllib.request import urlopen, Request
 from PyQt6.QtWidgets import (
@@ -14,6 +14,9 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 PIPER_DIR      = Path.home() / ".local/share/piper"
 FAVORITES_FILE = PIPER_DIR / "favorites.json"
 REPO_RAW = "https://raw.githubusercontent.com/oddsclaude/tts-discord-linux/main"
+
+SAM_STEM = "sam"
+SAM_RATE = 22050
 
 
 # ── helpers ───────────────────────────────────────────────────
@@ -37,22 +40,34 @@ def set_favorites(favs):
     FAVORITES_FILE.write_text(json.dumps(sorted(favs)))
 
 def get_rate(model):
+    if model == SAM_STEM:
+        return SAM_RATE
     try:
         return json.loads((PIPER_DIR / f"{model}.onnx.json").read_text())["audio"]["sample_rate"]
     except:
         return 22050
 
 def model_exists(stem):
+    if stem == SAM_STEM:
+        return shutil.which("sam") is not None
     return (PIPER_DIR / f"{stem}.onnx").exists() and (PIPER_DIR / f"{stem}.onnx.json").exists()
 
 def speak_text(text, to_mic=True):
     active = get_active()
     if not active:
         return
-    model_path = str(PIPER_DIR / f"{active}.onnx")
-    rate       = get_rate(active)
-    piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
-                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    rate = get_rate(active)
+    if active == SAM_STEM:
+        sam = subprocess.Popen(["sam", "-stdout", text],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        piper = subprocess.Popen(["sox", "-t", "raw", "-r", "22050", "-b", "8", "-c", "1", "-e", "unsigned", "-",
+                                  "-t", "raw", "-r", str(rate), "-b", "16", "-e", "signed", "-"],
+                                 stdin=sam.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        sam.stdout.close()
+    else:
+        model_path = str(PIPER_DIR / f"{active}.onnx")
+        piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if to_mic:
         sink = subprocess.Popen(["bash", "-c",
             f"tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate={rate} --channels=1)"
@@ -62,11 +77,16 @@ def speak_text(text, to_mic=True):
         sink = subprocess.Popen(["pacat", "--volume=65536", "--format=s16le", f"--rate={rate}", "--channels=1"],
                                 stdin=piper.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     piper.stdout.close()
-    piper.stdin.write(text.encode())
-    piper.stdin.close()
+    if active != SAM_STEM:
+        piper.stdin.write(text.encode())
+        piper.stdin.close()
     sink.wait()
 
 def switch_model(model):
+    if model == SAM_STEM:
+        (PIPER_DIR / "active_model").write_text(SAM_STEM)
+        (PIPER_DIR / "active_rate").write_text(str(SAM_RATE))
+        return
     (PIPER_DIR / "active_model").write_text(str(PIPER_DIR / f"{model}.onnx"))
     (PIPER_DIR / "active_rate").write_text(str(get_rate(model)))
 
@@ -116,10 +136,7 @@ class TestAndDeleteWorker(QThread):
         finally:
             if old_active:
                 switch_model(old_active)
-            if not self.keep:
-                (PIPER_DIR / f"{self.stem}.onnx").unlink(missing_ok=True)
-                (PIPER_DIR / f"{self.stem}.onnx.json").unlink(missing_ok=True)
-        self.done.emit(f"Tested {self.stem}." if self.keep else f"Tested and deleted {self.stem}.")
+        self.done.emit(f"Tested {self.stem}.")
 
 class GladosWorker(QThread):
     done = pyqtSignal(bool, str)
@@ -187,6 +204,20 @@ class TrumpWorker(QThread):
         finally:
             if tmp_archive and tmp_archive.exists():
                 tmp_archive.unlink(missing_ok=True)
+
+class SamWorker(QThread):
+    done = pyqtSignal(bool, str)
+    STEM = SAM_STEM
+    def run(self):
+        if shutil.which("sam") is None:
+            self.done.emit(False, "'sam' binary not found in PATH. Build it from "
+                                   "https://github.com/vidarh/SAM (make && sudo make install), "
+                                   "then try again.")
+            return
+        if shutil.which("sox") is None:
+            self.done.emit(False, "'sox' not found in PATH. Install it via your package manager first.")
+            return
+        self.done.emit(True, "")
 
 class VoicesWorker(QThread):
     done = pyqtSignal(dict)
@@ -290,6 +321,7 @@ class DownloadDialog(QDialog):
         ("GLaDOS",   GladosWorker,  "glados",  "Hello. You are doing very well.", False),
         ("HAL-9000", Hal9000Worker, "hal9000", "I'm sorry, I can't do that.",     False),
         ("Trump",    TrumpWorker,   "trump",   "Believe me, this is the best.",   False),
+        ("S.A.M.",   SamWorker,     SAM_STEM,  "Hello. I am Sam. The software automatic mouth.", False),
     ]
 
     def __init__(self, parent=None):
@@ -578,6 +610,8 @@ class MainWindow(QMainWindow):
         self.active_label.setText(f"Active: {active}  ({rate} Hz)" if active else "Active: none")
 
         models    = get_models()
+        if model_exists(SAM_STEM) and SAM_STEM not in models:
+            models.append(SAM_STEM)
         favorites = get_favorites()
         favs   = sorted(m for m in models if m in favorites)
         others = sorted(m for m in models if m not in favorites)
@@ -660,6 +694,10 @@ class MainWindow(QMainWindow):
             return
         if m == get_active():
             QMessageBox.warning(self, "Remove", "Can't remove active model - switch first")
+            return
+        if m == SAM_STEM:
+            QMessageBox.information(self, "Remove", "S.A.M. isn't a downloaded model file, "
+                                     "uninstall the 'sam' binary itself to remove it.")
             return
         if QMessageBox.question(self, "Remove", f"Delete {m}?") == QMessageBox.StandardButton.Yes:
             (PIPER_DIR / f"{m}.onnx").unlink(missing_ok=True)
