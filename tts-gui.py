@@ -57,13 +57,15 @@ def speak_text(text, to_mic=True):
     if not active:
         return
     rate = get_rate(active)
+    sam_wav = None
     if active == SAM_STEM:
-        sam = subprocess.Popen(["sam", "-stdout", text],
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        piper = subprocess.Popen(["sox", "-t", "raw", "-r", "22050", "-b", "8", "-c", "1", "-e", "unsigned", "-",
+        sam_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sam_wav.close()
+        subprocess.run(["sam", "-wav", sam_wav.name] + text.split(),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        piper = subprocess.Popen(["sox", sam_wav.name,
                                   "-t", "raw", "-r", str(rate), "-b", "16", "-e", "signed", "-"],
-                                 stdin=sam.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        sam.stdout.close()
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     else:
         model_path = str(PIPER_DIR / f"{active}.onnx")
         piper = subprocess.Popen(["piper-tts", "--model", model_path, "--output_raw"],
@@ -81,6 +83,8 @@ def speak_text(text, to_mic=True):
         piper.stdin.write(text.encode())
         piper.stdin.close()
     sink.wait()
+    if sam_wav:
+        Path(sam_wav.name).unlink(missing_ok=True)
 
 def switch_model(model):
     if model == SAM_STEM:

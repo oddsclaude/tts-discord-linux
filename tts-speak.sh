@@ -5,10 +5,12 @@ RATE=$(cat "$HOME/.local/share/piper/active_rate" 2>/dev/null || echo "22050")
 speak() {
     local text="$1"
     if [[ "$MODEL" == "sam" ]]; then
-        sam -stdout "$text" \
-            | sox -t raw -r 22050 -b 8 -c 1 -e unsigned - -t raw -r "$RATE" -b 16 -e signed - \
+        local wav; wav=$(mktemp --suffix=.wav)
+        sam -wav "$wav" $text
+        sox "$wav" -t raw -r "$RATE" -b 16 -e signed - \
             | tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate="$RATE" --channels=1) \
             | pacat --volume=65536 --format=s16le --rate="$RATE" --channels=1
+        rm -f "$wav"
     else
         piper-tts --model "$MODEL" --output_raw <<< "$text" \
             | tee >(pacat --device=tts_sink --volume=65536 --format=s16le --rate="$RATE" --channels=1) \
